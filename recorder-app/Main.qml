@@ -60,6 +60,7 @@ Rectangle {
     onPageChanged: captureTimer.restart()
     onRecordingChanged: captureTimer.restart()
     onPlayingChanged: captureTimer.restart()
+    function scheduleCapture() { captureTimer.restart() }
     function isPowerKey(key) { return key === Qt.Key_6 || key === Qt.Key_PowerOff }
 
     function timeText(t, precise) {
@@ -71,9 +72,10 @@ Rectangle {
         var m = /^REC-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(name)
         return m ? m[2] + "/" + m[3] + "  " + m[4] + ":" + m[5] + ":" + m[6] : name
     }
-    function request(path, post, callback) {
+    function request(path, post, callback, form) {
         var xhr = new XMLHttpRequest()
         xhr.open(post ? "POST" : "GET", api + path)
+        if (post) xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded")
         xhr.onreadystatechange = function() {
             if (xhr.readyState !== XMLHttpRequest.DONE) return
             var data
@@ -81,7 +83,7 @@ Rectangle {
             if (xhr.status !== 200 || data.error) { app.message = data.error || "Audio request failed"; notice.restart() }
             if (callback) callback(data, xhr.status === 200 && !data.error)
         }
-        xhr.send("")
+        xhr.send(form || "")
     }
     function refreshFiles() {
         request("files", false, function(data, ok) {
@@ -142,6 +144,7 @@ Rectangle {
     function touchFocus() { mHomePress = false; mHoldTimer.stop(); forceActiveFocus() }
     function goBack() {
         touchFocus()
+        if (page === 3) { wifiPage.back(); return }
         if (playing) request("stop",true)
         selectPreviewFile()
         page = page === 2 ? 1 : 0
@@ -162,6 +165,7 @@ Rectangle {
             if (!busy && audio.captureReady) startRecording()
             return
         }
+        if (page === 3) { wifiPage.hardware(key); return }
         if (key === Qt.Key_2) {
             request("stop",true)
             if (!busy) { selectPreviewFile(); page = page === 2 ? 1 : 0 }
@@ -176,6 +180,7 @@ Rectangle {
         }
         if (recording) return
         var up = key === Qt.Key_4 || key === Qt.Key_VolumeUp
+        if (page === 0 && up && !busy) { page = 3; return }
         if (page === 2) seekStep(up)
         else {
             if (page === 0) showFiles()
@@ -204,14 +209,14 @@ Rectangle {
     Timer {
         id: captureTimer
         interval: 1800; running: true
-        onTriggered: app.grabToImage(function(result) { result.saveToFile("/userdata/e1-recorder/screenshot.png") })
+        onTriggered: if (page !== 3 || !wifiPage.editing || !wifiPage.password.length) app.grabToImage(function(result) { result.saveToFile("/userdata/e1-recorder/screenshot.png") })
     }
 
     Item {
         x: 18; y: 10; width: 285; height: 32
         Text {
             x: page ? 28 : 0; y: 5
-            text: page === 0 ? "RECORDER" : page === 1 ? "Recordings" : "Playback"
+            text: page === 0 ? "RECORDER" : page === 1 ? "Recordings" : page === 3 ? "Wi-Fi" : "Playback"
             color: "#f2f5fa"; font.family: "Roboto"; font.bold: true; font.pixelSize: 17
         }
         Text { visible: page !== 0; x: 0; y: -2; text: "‹"; color: "#aab8cb"; font.pixelSize: 31 }
@@ -219,7 +224,9 @@ Rectangle {
             visible: page !== 0; x: -8; y: -5; width: 45; height: 42
             onClicked: app.goBack()
         }
-        Text { x: 207; y: 7; width: 78; horizontalAlignment: Text.AlignRight; text: page === 0 ? "FILES" : page === 1 ? "± SELECT" : "HARD KEYS"; color: "#83dcc0"; font.pixelSize: 10; font.bold: true; opacity: recording ? 0.35 : 1 }
+        Text { visible: page === 0; x: 145; y: 7; text: "WI-FI"; color: "#83dcc0"; font.pixelSize: 10; font.bold: true; opacity: busy ? 0.35 : 1 }
+        MouseArea { visible: page === 0; enabled: !busy; x: 131; y: -3; width: 68; height: 40; onClicked: { app.touchFocus(); app.page = 3 } }
+        Text { x: 207; y: 7; width: 78; horizontalAlignment: Text.AlignRight; text: page === 0 ? "FILES" : page === 1 ? "± SELECT" : page === 3 ? "NETWORK" : "HARD KEYS"; color: "#83dcc0"; font.pixelSize: 10; font.bold: true; opacity: recording ? 0.35 : 1 }
         MouseArea {
             visible: page === 0; enabled: !recording; x: 205; y: -3; width: 80; height: 40
             onClicked: { app.touchFocus(); app.showFiles() }
@@ -324,10 +331,11 @@ Rectangle {
         }
         Text { x: 20; y: 274; text: playing ? "▶ PLAYING" : "■ STOPPED"; color: playing ? "#83dcc0" : "#8f9db2"; font.pixelSize: 10; font.bold: true }
     }
+    WifiPage { id: wifiPage; visible: page === 3; anchors.fill: parent; host: app }
     Rectangle { x: 20; y: 291; width: 280; height: 1; color: "#2a3442" }
     Text {
         x: 20; y: 300; width: 280; elide: Text.ElideRight
-        text: message || (page === 1 ? "± choose · M open · STOP back" : page === 2 ? "M play/stop · ± marks/seek · STOP back" : recording ? "M mark · STOP save" : "REC record · M files · hold M exit")
+        text: page === 3 ? wifiPage.localMessage || wifiPage.info.message || (wifiPage.editing ? "Tap to cycle · hold for digit · abc › modes" : "STOP back · REC record") : message || (page === 1 ? "± choose · M open · STOP back" : page === 2 ? "M play/stop · ± marks/seek · STOP back" : recording ? "M mark · STOP save" : "REC record · M files · + Wi-Fi · hold M exit")
         color: audio.error ? "#ff9c9e" : "#8193ac"; font.pixelSize: 10
     }
     Rectangle {

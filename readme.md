@@ -10,6 +10,7 @@ A custom recorder for the Sogou E1, with physical-button controls, a native ALSA
 - Marks stored as embedded WAV cue points and in a JSON sidecar.
 - Recording browser, stereo waveform preview, playback and seeking.
 - Hardware and touch file selection, waveform seeking and mark navigation.
+- Wi-Fi scanning, password entry, saved networks and connection/IP status.
 
 Recordings are saved in the large recording partition:
 
@@ -112,6 +113,9 @@ These are **unsigned ADB application updates**. SHA-256 checks detect corruption
 | **M**, while recording | Add one sample-indexed mark per press |
 | **STOP**, while recording or playing | Save the recording or stop playback |
 | **M**, on the ready screen | Open the recording list |
+| **+**, on the ready screen | Open Wi-Fi settings |
+| **+ / −**, in Wi-Fi settings | Highlight a network |
+| **M**, in Wi-Fi settings | Open the highlighted network; connect from its password page |
 | **+ / −**, in the recording list | Move the highlighted file selection up/down |
 | **M**, in the recording list | Open the selected file's waveform preview |
 | **M**, in the preview | Start or stop playback |
@@ -135,6 +139,18 @@ Deploy again to reactivate the custom recorder.
 
 Standard RIFF WAV files have a size limit of approximately 4 GiB, or 4.5 hours at this format. The app stops and saves before reaching that limit. Recording data is about 0.95 GB per hour.
 
+## Wi-Fi settings
+
+While idle, tap **WI-FI** in the top bar or press **+**. Tap **SCAN**, choose a network, enter its password and tap **CONNECT**. The compact phone-style keyboard uses 12 large keys. Tap a letter key repeatedly to cycle its characters; pause for 0.9 seconds or tap another key to accept the character. Hold a letter key to enter its digit. Tap the bottom-left mode key to cycle **abc → ABC → 123 → symbols**. Space/zero and backspace occupy the other bottom keys; **SHOW/HIDE** sits beside the password. Physical **+** changes keyboard mode and **−** erases a character while editing. The status page distinguishes authentication from obtaining an IPv4 address and shows the address when assigned. “Connected” indicates a Wi-Fi link with an address, without testing Internet access.
+
+Saved networks reconnect automatically when Wi-Fi starts. Select a saved network and tap **CONNECT** with an empty password to reuse its credentials; enter a new password to replace them after successful authentication. **FORGET** asks for confirmation. **ON/OFF** controls Wi-Fi and remembers the preference. **STOP** or the back arrow closes the password editor or returns to the recorder. **REC** and the three-second POWER hold remain available throughout these screens.
+
+This implementation supports scanned open and WPA/WPA2 personal networks with ASCII passphrases (8–63 bytes) or 64-digit hexadecimal PSKs. Hidden-network entry, enterprise authentication, WEP and WPA3-only networks are not implemented.
+
+The native Wi-Fi worker uses the firmware's `wpa_supplicant` 2.6 service, its [documented control socket protocol](https://w1.fi/wpa_supplicant/devel/ctrl_iface_page.html), and the existing `dhcpcd` service. It starts independently of the factory UI and runs separately from audio capture. Credentials travel in local HTTP POST bodies and Unix socket messages, and are excluded from API responses and command-line arguments. New personal-network passphrases are converted to PSKs using the device's OpenSSL runtime before storage. The factory-compatible profile file is `/data/cfg/wpa_supplicant.conf` (on userdata); the app restricts it to mode `0600` and creates an initial, private device-side backup at `/userdata/e1-recorder/wpa_supplicant.factory.conf`. These files contain credentials and stay on the recorder.
+
+Tentative profiles are saved only after authentication succeeds. Cancel, an incorrect-password event or a 35-second authentication timeout removes the tentative profile and reloads the previous saved configuration. Scanning and changing settings remain independent of recording; USB ADB remains available when Wi-Fi is off.
+
 ## Diagnostics
 
 The backend's control API listens on the recorder's loopback address, port `18770`. Deployment creates an ADB forward to the Mac. To inspect status manually:
@@ -147,6 +163,8 @@ adb -s 15dacc90f0c2e787 shell 'tail -50 /userdata/e1-recorder/ui.log'
 ```
 
 The backend serves `/api/status`, `/api/files` and `/api/wave` through GET requests. Recording, marking, stopping, playback, seeking and shutdown use POST requests in `recorder-app/recorderd.c`.
+
+Wi-Fi status and discovered/saved networks are available at `GET /api/wifi`. The form-encoded POST endpoints `/api/wifi/scan`, `/connect`, `/cancel`, `/enable` and `/forget` queue work in `recorder-app/wifi.c`. Connection fields are `ssid` (raw SSID bytes as hex), `security` (`open`, `WPA-PSK` or `saved`), and `password`; enable uses `enabled=0/1`, and forget uses the profile `id`. A successful POST acknowledges the queued command; poll Wi-Fi status for its result. Password editors with nonempty input are excluded from automatic screenshots.
 
 Saved `grabToImage` screenshots appear vertically mirrored on the tested Qt software renderer; the physical screen is upright.
 

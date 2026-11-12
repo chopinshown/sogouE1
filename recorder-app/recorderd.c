@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "wifi.h"
 
 #define RATE 44100
 #define CHANNELS 2
@@ -336,14 +337,30 @@ static char *wave_json(const char *name) {
 }
 static void handle_client(int fd) {
     char request[4096]={0};struct timeval timeout={2,0};setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof timeout);setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof timeout);
-    size_t used=0;
-    while(used+1<sizeof request) {ssize_t n=read(fd,request+used,sizeof request-used-1);if(n<=0)return;used+=n;request[used]=0;if(strstr(request,"\r\n\r\n"))break;}
+    size_t used=0;char *form=NULL;
+    while(used+1<sizeof request) {ssize_t n=read(fd,request+used,sizeof request-used-1);if(n<=0)return;used+=n;request[used]=0;if((form=strstr(request,"\r\n\r\n")))break;}
+    if(!form){response(fd,400,"{\"error\":\"Request header too large\"}");return;}
+    size_t header_bytes=(size_t)(form-request)+4,content_length=0;form+=4;
+    for(char *p=strstr(request,"\r\n")+2;p<form-2;) {
+        char *end=strstr(p,"\r\n");if(!end)break;
+        if(!strncasecmp(p,"Content-Length:",15)) {
+            char *tail;unsigned long n=strtoul(p+15,&tail,10);
+            while(tail<end&&(*tail==' '||*tail=='\t'))tail++;
+            if(tail!=end||n>2048){response(fd,400,"{\"error\":\"Invalid body size\"}");return;}content_length=n;
+        }
+        if(!strncasecmp(p,"Transfer-Encoding:",18)){response(fd,400,"{\"error\":\"Chunked requests unsupported\"}");return;}
+        p=end+2;
+    }
+    if(header_bytes+content_length>=sizeof request){response(fd,400,"{\"error\":\"Request too large\"}");return;}
+    while(used<header_bytes+content_length){ssize_t n=read(fd,request+used,header_bytes+content_length-used);if(n<=0)return;used+=n;}
+    request[header_bytes+content_length]=0;
     char method[12],url[1024];if(sscanf(request,"%11s %1023s",method,url)!=2){response(fd,400,"{\"error\":\"Bad request\"}");return;}
     char *query=strchr(url,'?');if(query)*query++=0;
     char name[128],position[64];query_value(query,"file",name,sizeof name);query_value(query,"position",position,sizeof position);
     if(!strcmp(method,"GET")) {
         char *body=NULL;
         if(!strcmp(url,"/api/status"))body=status_json();
+        else if(!strcmp(url,"/api/wifi"))body=wifi_json();
         else if(!strcmp(url,"/api/files"))body=files_json();
         else if(!strcmp(url,"/api/wave")&&valid_name(name))body=wave_json(name);
         if(body){response(fd,200,body);free(body);}else response(fd,404,"{\"error\":\"Unknown resource\"}");
@@ -351,6 +368,13 @@ static void handle_client(int fd) {
     }
     if(strcmp(method,"POST")){response(fd,405,"{\"error\":\"Use POST\"}");return;}
     int status=200;const char *error=NULL;
+    if(!strncmp(url,"/api/wifi/",10)) {
+        status=wifi_submit(url+10,form,&error);
+        explicit_bzero(request,sizeof request);
+        if(error){char *body=NULL;size_t size=0;FILE *f=open_memstream(&body,&size);fputs("{\"error\":",f);json_string(f,error);fputs("}",f);fclose(f);response(fd,status,body);free(body);}
+        else response(fd,200,"{\"ok\":true}");
+        return;
+    }
     pthread_mutex_lock(&S.mutex);
     if(!strcmp(url,"/api/poweroff")) {
         S.shutting_down=1;S.shutdown_failed=0;S.command=STOP;
@@ -395,17 +419,19 @@ int main(int argc,char **argv) {
     else if(argc>2){fprintf(stderr,"Usage: recorderd [STORAGE] [--poweroff-test]\n");return 2;}
     if(mkdir(storage,0770)&&errno!=EEXIST){perror(storage);return 1;}
     signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);signal(SIGPIPE,SIG_IGN);envelope_reset(&S.wave);
-    int server=socket(AF_INET,SOCK_STREAM,0),one=1;setsockopt(server,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
+    int server=socket(AF_INET,SOCK_STREAM|SOCK_CLOEXEC,0),one=1;setsockopt(server,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
     struct sockaddr_in addr={.sin_family=AF_INET,.sin_port=htons(PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     if(server<0||bind(server,(void*)&addr,sizeof addr)||listen(server,8)){perror("Recorder API");return 1;}
     fprintf(stderr,"E1_RECORDER_BACKEND_READY %s storage=%s\n",VERSION,storage);
+    wifi_start();
     for(;;) {
         pthread_t thread;if(pthread_create(&thread,NULL,audio_thread,NULL)){perror("Audio thread");close(server);return 1;}
         while(alive) {
             fd_set set;FD_ZERO(&set);FD_SET(server,&set);struct timeval wait={0,200000};
-            int r=select(server+1,&set,NULL,NULL,&wait);if(r>0){int fd=accept(server,NULL,NULL);if(fd>=0){handle_client(fd);close(fd);}}
+            int r=select(server+1,&set,NULL,NULL,&wait);if(r>0){int fd=accept4(server,NULL,NULL,SOCK_CLOEXEC);if(fd>=0){handle_client(fd);close(fd);}}
         }
         pthread_join(thread,NULL);
+        wifi_stop();
         if(!shutdown_requested)break;
         /* The audio thread has finalized WAV/cue data and closed both PCMs. */
         save_poweroff_audit();sync();
@@ -427,6 +453,7 @@ int main(int argc,char **argv) {
         snprintf(S.error,sizeof S.error,"Poweroff failed; release POWER and try again");
         pthread_mutex_unlock(&S.mutex);
         shutdown_requested=0;alive=1;
+        wifi_start();
     }
     close(server);fprintf(stderr,"E1_RECORDER_SHUTDOWN\n");return 0;
 }

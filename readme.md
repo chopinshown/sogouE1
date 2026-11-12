@@ -1,6 +1,12 @@
-# Sogou E1 Recorder
+# Sogou E1 Recorder + Xiaozhi
 
 A custom recorder for the Sogou E1, with physical-button controls, a native ALSA audio backend and a Qt Quick display. Applications are built on the Mac and installed through ADB using the firmware's writable application override.
+
+## Xiaozhi voice assistant
+
+The `feat/xiaozhi-e1` branch adds a Linux client for the [Xiaozhi voice assistant](https://github.com/78/xiaozhi-esp32), using the recorder app as its base. It opens on the voice page: **M** activates/binds the official service, **REC** starts talking, **STOP** sends the turn, and **M** cancels an active operation. **+ / −** adjust voice playback volume. The back arrow opens the recorder; **VOICE** returns to the assistant. Wi-Fi settings and the three-second POWER shutdown remain available.
+
+See [the port design, setup, controls and limitations](docs/xiaozhi-e1.md). This first port uses manual WebSocket/Opus turns; wake words and full-duplex echo cancellation are not implemented. Build dependencies now include CMake; the build downloads checksum-pinned voice/TLS libraries and includes their license notices in the app bundle.
 
 ## Recorder features
 

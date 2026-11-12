@@ -19,6 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "wifi.h"
+#include "xiaozhi.h"
 
 #define RATE 44100
 #define CHANNELS 2
@@ -28,8 +29,8 @@
 #define PORT 18770
 #define VERSION "1.0.0"
 #define MIB (1024ULL*1024ULL)
-enum { IDLE, RECORDING, PLAYING };
-enum { NONE, RECORD, PLAY, STOP };
+enum { IDLE, RECORDING, PLAYING, ASSISTANT };
+enum { NONE, RECORD, PLAY, STOP, TALK };
 typedef struct {
     float l[PEAKS], r[PEAKS], partial_l, partial_r;
     int count;
@@ -222,7 +223,8 @@ static void *audio_thread(void *unused) {
     while(alive) {
         pthread_mutex_lock(&S.mutex);
         int command=S.command;S.command=NONE;
-        if(command==STOP){finish_record();close_playback(0);S.mode=IDLE;S.seek=-1;}
+        if(command==STOP){finish_record();close_playback(0);if(S.mode==ASSISTANT)xiaozhi_cancel();else S.mode=IDLE;S.seek=-1;}
+        if(command==TALK&&S.mode==IDLE){close_capture();if(xiaozhi_begin())S.mode=ASSISTANT;}
         if(command==RECORD&&S.mode==IDLE){start_record();last_sync=0;}
         if(command==PLAY&&S.mode==IDLE)start_playback();
         if(S.mode==PLAYING&&S.seek>=0) {
@@ -230,9 +232,13 @@ static void *audio_thread(void *unused) {
             snd_pcm_drop(playback);snd_pcm_prepare(playback);fseeko(play_file,play_data+(off_t)play_frames*6,SEEK_SET);S.position=play_frames/(double)RATE;S.seek=-1;
         }
         int mode=S.mode;
-        if(mode!=PLAYING&&!capture)capture_open();
+        if(mode!=PLAYING&&mode!=ASSISTANT&&!capture)capture_open();
         int ready=capture!=NULL;
         pthread_mutex_unlock(&S.mutex);
+        if(mode==ASSISTANT) {
+            if(!xiaozhi_active()){pthread_mutex_lock(&S.mutex);S.mode=IDLE;pthread_mutex_unlock(&S.mutex);}
+            usleep(20000);continue;
+        }
         if(mode==PLAYING) {
             size_t n=fread(packed,6,FRAMES,play_file);
             if(!n) {close_playback(1);pthread_mutex_lock(&S.mutex);S.mode=IDLE;S.position=S.duration;S.left_db=S.right_db=-96;pthread_mutex_unlock(&S.mutex);continue;}
@@ -303,7 +309,7 @@ static void query_value(const char *query,const char *key,char *out,size_t size)
 static char *status_json(void) {
     char *body=NULL;size_t len=0;FILE *f=open_memstream(&body,&len);
     pthread_mutex_lock(&S.mutex);
-    fprintf(f,"{\"version\":\"%s\",\"state\":\"%s\",\"captureReady\":%s,\"rate\":44100,\"bits\":24,\"channels\":2,\"leftDb\":%.2f,\"rightDb\":%.2f,\"leftRms\":%.2f,\"rightRms\":%.2f,\"elapsed\":%.6f,\"position\":%.6f,\"duration\":%.6f,\"xruns\":%d,\"file\":",VERSION,S.mode==RECORDING?"recording":S.mode==PLAYING?"playing":"idle",S.capture_ready?"true":"false",S.left_db,S.right_db,S.left_rms,S.right_rms,S.mode==RECORDING?S.frames/(double)RATE:S.position,S.position,S.duration,S.xruns);
+    fprintf(f,"{\"version\":\"%s\",\"state\":\"%s\",\"captureReady\":%s,\"rate\":44100,\"bits\":24,\"channels\":2,\"leftDb\":%.2f,\"rightDb\":%.2f,\"leftRms\":%.2f,\"rightRms\":%.2f,\"elapsed\":%.6f,\"position\":%.6f,\"duration\":%.6f,\"xruns\":%d,\"file\":",VERSION,S.mode==RECORDING?"recording":S.mode==PLAYING?"playing":S.mode==ASSISTANT?"assistant":"idle",S.capture_ready?"true":"false",S.left_db,S.right_db,S.left_rms,S.right_rms,S.mode==RECORDING?S.frames/(double)RATE:S.position,S.position,S.duration,S.xruns);
     json_string(f,S.name);fputs(",\"error\":",f);json_string(f,S.error);fputs(",\"marks\":",f);print_marks(f);
     fprintf(f,",\"shuttingDown\":%s,\"shutdownFailed\":%s",S.shutting_down?"true":"false",S.shutdown_failed?"true":"false");
     fputs(",\"left\":",f);if(S.mode==RECORDING)print_envelope(f,&S.wave,0,140);else fputs("[]",f);
@@ -361,6 +367,7 @@ static void handle_client(int fd) {
         char *body=NULL;
         if(!strcmp(url,"/api/status"))body=status_json();
         else if(!strcmp(url,"/api/wifi"))body=wifi_json();
+        else if(!strcmp(url,"/api/assistant"))body=xiaozhi_json();
         else if(!strcmp(url,"/api/files"))body=files_json();
         else if(!strcmp(url,"/api/wave")&&valid_name(name))body=wave_json(name);
         if(body){response(fd,200,body);free(body);}else response(fd,404,"{\"error\":\"Unknown resource\"}");
@@ -368,6 +375,14 @@ static void handle_client(int fd) {
     }
     if(strcmp(method,"POST")){response(fd,405,"{\"error\":\"Use POST\"}");return;}
     int status=200;const char *error=NULL;
+    if(!strncmp(url,"/api/assistant/",15)&&strcmp(url,"/api/assistant/talk")) {
+        pthread_mutex_lock(&S.mutex);
+        if(!strcmp(url+15,"activate")&&(S.mode!=IDLE||S.command!=NONE)){status=409;error="Stop audio before activation";}
+        else status=xiaozhi_submit(url+15,&error);
+        pthread_mutex_unlock(&S.mutex);
+        if(error){char buf[320];snprintf(buf,sizeof buf,"{\"error\":\"%s\"}",error);response(fd,status,buf);}else response(fd,200,"{\"ok\":true}");
+        return;
+    }
     if(!strncmp(url,"/api/wifi/",10)) {
         status=wifi_submit(url+10,form,&error);
         explicit_bzero(request,sizeof request);
@@ -383,6 +398,11 @@ static void handle_client(int fd) {
         fprintf(stderr,"E1_POWEROFF_REQUEST recording=%d\n",shutdown_was_recording);
     }
     else if(!strcmp(url,"/api/stop"))S.command=STOP;
+    else if(!strcmp(url,"/api/assistant/talk")) {
+        if(S.mode!=IDLE||S.command!=NONE||xiaozhi_active()){status=409;error="Finish the current operation first";}
+        else if(!S.capture_ready){status=503;error="Microphone is not ready";}
+        else S.command=TALK;
+    }
     else if(!strcmp(url,"/api/record")) {
         if(S.mode!=IDLE||S.command!=NONE){status=409;error="Stop the current operation first";}
         else if(!S.capture_ready){status=503;error="Microphone is not ready";}
@@ -423,7 +443,7 @@ int main(int argc,char **argv) {
     struct sockaddr_in addr={.sin_family=AF_INET,.sin_port=htons(PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     if(server<0||bind(server,(void*)&addr,sizeof addr)||listen(server,8)){perror("Recorder API");return 1;}
     fprintf(stderr,"E1_RECORDER_BACKEND_READY %s storage=%s\n",VERSION,storage);
-    wifi_start();
+    wifi_start();xiaozhi_start();
     for(;;) {
         pthread_t thread;if(pthread_create(&thread,NULL,audio_thread,NULL)){perror("Audio thread");close(server);return 1;}
         while(alive) {
@@ -431,6 +451,7 @@ int main(int argc,char **argv) {
             int r=select(server+1,&set,NULL,NULL,&wait);if(r>0){int fd=accept4(server,NULL,NULL,SOCK_CLOEXEC);if(fd>=0){handle_client(fd);close(fd);}}
         }
         pthread_join(thread,NULL);
+        xiaozhi_stop();
         wifi_stop();
         if(!shutdown_requested)break;
         /* The audio thread has finalized WAV/cue data and closed both PCMs. */
@@ -453,7 +474,7 @@ int main(int argc,char **argv) {
         snprintf(S.error,sizeof S.error,"Poweroff failed; release POWER and try again");
         pthread_mutex_unlock(&S.mutex);
         shutdown_requested=0;alive=1;
-        wifi_start();
+        wifi_start();xiaozhi_start();
     }
     close(server);fprintf(stderr,"E1_RECORDER_SHUTDOWN\n");return 0;
 }

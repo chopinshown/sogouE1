@@ -9,6 +9,7 @@ VERSION="1.0.0"
 files={p.name:p.read_bytes() for p in ROOT.glob("*.qml")}
 files["run.sh"]=(ROOT/"run.sh").read_bytes()
 files["recorderd"]=(ROOT/"build/recorderd").read_bytes()
+files["voice-licenses.txt"]=(ROOT/"build/voice-licenses.txt").read_bytes()
 hashes={name:hashlib.sha256(data).hexdigest() for name,data in files.items()}
 release=VERSION+"-"+hashlib.sha256(json.dumps(hashes,sort_keys=True).encode()).hexdigest()[:8]
 files["checksums.sha256"]="".join(h+"  "+name+"\n" for name,h in sorted(hashes.items())).encode()

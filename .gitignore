@@ -26,3 +26,7 @@ recorder-app/build/
 recorder-app/dist/
 recorder-app/evidence/
 recorder-app/sysroot/
+
+# Private Xiaozhi service configuration
+/xiaozhi.json
+/recorder-app/xiaozhi.json

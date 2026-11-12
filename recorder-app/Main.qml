@@ -14,6 +14,9 @@ Rectangle {
     property bool polling: false
     property bool mHomePress: false
     property bool touchSeeking: false
+    property bool powerHeld: false
+    property bool shutdownPending: false
+    property int powerSeconds: 3
     property bool recording: audio.state === "recording"
     property bool playing: audio.state === "playing"
     property bool busy: recording || playing
@@ -23,6 +26,16 @@ Rectangle {
     Keys.priority: Keys.BeforeItem
     Keys.onPressed: {
         var key = event.key
+        if (isPowerKey(key)) {
+            event.accepted = true
+            if (!event.isAutoRepeat && !powerHeld && !shutdownPending) {
+                console.log("E1_POWER_PRESS " + key)
+                mHomePress = false; mHoldTimer.stop(); exitPrompt.visible = false
+                powerHeld = true; powerSeconds = 3; powerHoldTimer.restart()
+            }
+            return
+        }
+        if (powerHeld || shutdownPending) { event.accepted = true; return }
         if (key !== Qt.Key_1 && key !== Qt.Key_2 && key !== Qt.Key_3 && key !== Qt.Key_4 && key !== Qt.Key_5
                 && key !== Qt.Key_VolumeUp && key !== Qt.Key_VolumeDown) { event.accepted = false; return }
         event.accepted = true
@@ -31,6 +44,11 @@ Rectangle {
         hardwareKey(key)
     }
     Keys.onReleased: {
+        if (isPowerKey(event.key)) {
+            event.accepted = true
+            if (!event.isAutoRepeat) { console.log("E1_POWER_RELEASE"); powerHeld = false; powerHoldTimer.stop() }
+            return
+        }
         if (event.key !== Qt.Key_1) { event.accepted = false; return }
         event.accepted = true
         if (event.isAutoRepeat) return
@@ -42,6 +60,7 @@ Rectangle {
     onPageChanged: captureTimer.restart()
     onRecordingChanged: captureTimer.restart()
     onPlayingChanged: captureTimer.restart()
+    function isPowerKey(key) { return key === Qt.Key_6 || key === Qt.Key_PowerOff }
 
     function timeText(t, precise) {
         t = Math.max(0, t || 0)
@@ -89,6 +108,7 @@ Rectangle {
             if (!ok) return
             var old = audio.state
             audio = data
+            if (data.shutdownFailed && shutdownPending) { shutdownPending = false; powerHeld = false; powerHoldTimer.stop() }
             if (data.error) message = data.error
             else if (message === "Connecting to audio…") message = ""
             if (data.state === "playing" && data.file === preview.name && !touchSeeking) previewPosition = data.position
@@ -169,6 +189,18 @@ Rectangle {
     Timer { interval: 15000; running: true; repeat: true; onTriggered: if (!app.busy) app.refreshFiles() }
     Timer { id: notice; interval: 5000; onTriggered: if (!app.audio.error) app.message = "" }
     Timer { id: mHoldTimer; interval: 1200; onTriggered: if (!app.busy && app.page === 0) exitPrompt.visible = true }
+    Timer {
+        id: powerHoldTimer; interval: 3000
+        onTriggered: {
+            if (!app.powerHeld || app.shutdownPending) return
+            app.shutdownPending = true
+            console.log("E1_POWER_LONG_PRESS 3000")
+            app.request("poweroff",true,function(data,ok) {
+                if (!ok) { app.shutdownPending = false; app.powerHeld = false }
+            })
+        }
+    }
+    Timer { interval: 1000; running: app.powerHeld && !app.shutdownPending; repeat: true; onTriggered: app.powerSeconds = Math.max(1,app.powerSeconds - 1) }
     Timer {
         id: captureTimer
         interval: 1800; running: true
@@ -303,5 +335,20 @@ Rectangle {
         Text { x: 24; y: 81; width: 272; text: "Return to the\nfactory recorder?"; horizontalAlignment: Text.AlignHCenter; color: "white"; font.pixelSize: 23 }
         Text { x: 24; y: 182; width: 272; text: "M: return to factory app"; horizontalAlignment: Text.AlignHCenter; color: "#83dcc0"; font.pixelSize: 17 }
         Text { x: 24; y: 225; width: 272; text: "STOP: cancel"; horizontalAlignment: Text.AlignHCenter; color: "#a9b6ca"; font.pixelSize: 15 }
+    }
+    Rectangle {
+        visible: powerHeld || shutdownPending; anchors.fill: parent; color: "#f510141c"; z: 30
+        Text {
+            x: 24; y: 93; width: 272; horizontalAlignment: Text.AlignHCenter
+            text: shutdownPending ? "Shutting down…" : "Hold POWER"
+            color: "#f2f5fa"; font.pixelSize: 25; font.bold: true
+        }
+        Text {
+            x: 24; y: 150; width: 272; horizontalAlignment: Text.AlignHCenter
+            text: shutdownPending ? "Saving audio and syncing storage" : powerSeconds + " s"
+            color: "#83dcc0"; font.pixelSize: shutdownPending ? 13 : 32
+        }
+        Text { visible: !shutdownPending; x: 24; y: 220; width: 272; text: "Release to cancel"; horizontalAlignment: Text.AlignHCenter; color: "#8f9db2"; font.pixelSize: 15 }
+        MouseArea { anchors.fill: parent }
     }
 }

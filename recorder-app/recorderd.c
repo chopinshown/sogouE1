@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -37,6 +38,7 @@ typedef struct {
     pthread_mutex_t mutex;
     int mode, command, mark_count, xruns;
     int capture_ready;
+    int shutting_down, shutdown_failed;
     double left_db, right_db, left_rms, right_rms;
     double position, duration, requested_position, seek;
     uint64_t frames, marks[MAX_MARKS];
@@ -45,6 +47,8 @@ typedef struct {
 } State;
 static State S = { .mutex=PTHREAD_MUTEX_INITIALIZER, .left_db=-96, .right_db=-96, .seek=-1 };
 static volatile sig_atomic_t alive = 1;
+static int shutdown_requested, poweroff_test, shutdown_was_recording;
+static uint64_t shutdown_requested_ms;
 static char storage[512] = "/mnt/sdcard/Recordings";
 static int record_fd = -1;
 static snd_pcm_t *capture, *playback;
@@ -53,6 +57,7 @@ static uint64_t play_frames, play_total;
 static off_t play_data;
 
 static void signal_stop(int sig) { (void)sig; alive=0; }
+static uint64_t monotonic_ms(void) { struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000; }
 static void le16(uint8_t *p, uint16_t v) { p[0]=v; p[1]=v>>8; }
 static void le32(uint8_t *p, uint32_t v) { for(int i=0;i<4;i++)p[i]=v>>(i*8); }
 static uint16_t u16(const uint8_t *p) { return p[0]|p[1]<<8; }
@@ -299,6 +304,7 @@ static char *status_json(void) {
     pthread_mutex_lock(&S.mutex);
     fprintf(f,"{\"version\":\"%s\",\"state\":\"%s\",\"captureReady\":%s,\"rate\":44100,\"bits\":24,\"channels\":2,\"leftDb\":%.2f,\"rightDb\":%.2f,\"leftRms\":%.2f,\"rightRms\":%.2f,\"elapsed\":%.6f,\"position\":%.6f,\"duration\":%.6f,\"xruns\":%d,\"file\":",VERSION,S.mode==RECORDING?"recording":S.mode==PLAYING?"playing":"idle",S.capture_ready?"true":"false",S.left_db,S.right_db,S.left_rms,S.right_rms,S.mode==RECORDING?S.frames/(double)RATE:S.position,S.position,S.duration,S.xruns);
     json_string(f,S.name);fputs(",\"error\":",f);json_string(f,S.error);fputs(",\"marks\":",f);print_marks(f);
+    fprintf(f,",\"shuttingDown\":%s,\"shutdownFailed\":%s",S.shutting_down?"true":"false",S.shutdown_failed?"true":"false");
     fputs(",\"left\":",f);if(S.mode==RECORDING)print_envelope(f,&S.wave,0,140);else fputs("[]",f);
     fputs(",\"right\":",f);if(S.mode==RECORDING)print_envelope(f,&S.wave,1,140);else fputs("[]",f);
     pthread_mutex_unlock(&S.mutex);fputs("}",f);fclose(f);return body;
@@ -346,7 +352,13 @@ static void handle_client(int fd) {
     if(strcmp(method,"POST")){response(fd,405,"{\"error\":\"Use POST\"}");return;}
     int status=200;const char *error=NULL;
     pthread_mutex_lock(&S.mutex);
-    if(!strcmp(url,"/api/stop"))S.command=STOP;
+    if(!strcmp(url,"/api/poweroff")) {
+        S.shutting_down=1;S.shutdown_failed=0;S.command=STOP;
+        shutdown_was_recording=S.mode==RECORDING;
+        shutdown_requested_ms=monotonic_ms();shutdown_requested=1;alive=0;
+        fprintf(stderr,"E1_POWEROFF_REQUEST recording=%d\n",shutdown_was_recording);
+    }
+    else if(!strcmp(url,"/api/stop"))S.command=STOP;
     else if(!strcmp(url,"/api/record")) {
         if(S.mode!=IDLE||S.command!=NONE){status=409;error="Stop the current operation first";}
         else if(!S.capture_ready){status=503;error="Microphone is not ready";}
@@ -365,18 +377,56 @@ static void handle_client(int fd) {
     pthread_mutex_unlock(&S.mutex);
     if(error){char buf[320];snprintf(buf,sizeof buf,"{\"error\":\"%s\"}",error);response(fd,status,buf);}else response(fd,200,"{\"ok\":true}");
 }
+static void save_poweroff_audit(void) {
+    FILE *f=fopen("/userdata/e1-recorder/poweroff-last.json","w");
+    if(!f){perror("Poweroff audit");return;}
+    fprintf(f,"{\"testOnly\":%s,\"hadActiveRecording\":%s,\"recordingFinalized\":%s,\"requestedAtMs\":%llu,\"audioClosedAtMs\":%llu,\"file\":",poweroff_test?"true":"false",shutdown_was_recording?"true":"false",record_fd<0?"true":"false",(unsigned long long)shutdown_requested_ms,(unsigned long long)monotonic_ms());
+    json_string(f,S.name);fprintf(f,",\"frames\":%llu,\"marks\":",(unsigned long long)S.frames);print_marks(f);fputs("}\n",f);
+    fflush(f);fsync(fileno(f));fclose(f);
+}
+static int prepare_panel(void) {
+    int fd=open("/proc/simplae_panel",O_WRONLY);
+    if(fd<0)return -1;
+    int result=write_all(fd,"1",1);int saved=errno;close(fd);errno=saved;return result;
+}
 int main(int argc,char **argv) {
-    if(argc==2)snprintf(storage,sizeof storage,"%s",argv[1]);
+    if(argc>=2)snprintf(storage,sizeof storage,"%s",argv[1]);
+    if(argc==3&&!strcmp(argv[2],"--poweroff-test"))poweroff_test=1;
+    else if(argc>2){fprintf(stderr,"Usage: recorderd [STORAGE] [--poweroff-test]\n");return 2;}
     if(mkdir(storage,0770)&&errno!=EEXIST){perror(storage);return 1;}
     signal(SIGTERM,signal_stop);signal(SIGINT,signal_stop);signal(SIGPIPE,SIG_IGN);envelope_reset(&S.wave);
     int server=socket(AF_INET,SOCK_STREAM,0),one=1;setsockopt(server,SOL_SOCKET,SO_REUSEADDR,&one,sizeof one);
     struct sockaddr_in addr={.sin_family=AF_INET,.sin_port=htons(PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     if(server<0||bind(server,(void*)&addr,sizeof addr)||listen(server,8)){perror("Recorder API");return 1;}
-    pthread_t thread;if(pthread_create(&thread,NULL,audio_thread,NULL)){perror("Audio thread");return 1;}
     fprintf(stderr,"E1_RECORDER_BACKEND_READY %s storage=%s\n",VERSION,storage);
-    while(alive) {
-        fd_set set;FD_ZERO(&set);FD_SET(server,&set);struct timeval wait={0,200000};
-        int r=select(server+1,&set,NULL,NULL,&wait);if(r>0){int fd=accept(server,NULL,NULL);if(fd>=0){handle_client(fd);close(fd);}}
+    for(;;) {
+        pthread_t thread;if(pthread_create(&thread,NULL,audio_thread,NULL)){perror("Audio thread");close(server);return 1;}
+        while(alive) {
+            fd_set set;FD_ZERO(&set);FD_SET(server,&set);struct timeval wait={0,200000};
+            int r=select(server+1,&set,NULL,NULL,&wait);if(r>0){int fd=accept(server,NULL,NULL);if(fd>=0){handle_client(fd);close(fd);}}
+        }
+        pthread_join(thread,NULL);
+        if(!shutdown_requested)break;
+        /* The audio thread has finalized WAV/cue data and closed both PCMs. */
+        save_poweroff_audit();sync();
+        if(poweroff_test){fprintf(stderr,"E1_POWEROFF_TEST_COMPLETE audio_closed=1 recording_saved=1\n");break;}
+        int result=prepare_panel();
+        if(!result) {
+            sync();fprintf(stderr,"E1_POWEROFF_EXEC /sbin/poweroff\n");fflush(stderr);
+            result=system("/sbin/poweroff");
+            if(!result) {
+                /* Let init run the factory rcK/unmount sequence. */
+                signal(SIGTERM,SIG_DFL);signal(SIGINT,SIG_DFL);
+                for(;;)pause();
+            }
+        }
+        fprintf(stderr,"E1_POWEROFF_FAILED result=%d errno=%d\n",result,errno);
+        int panel=open("/proc/simplae_panel",O_WRONLY);if(panel>=0){write_all(panel,"0",1);close(panel);}
+        pthread_mutex_lock(&S.mutex);
+        S.shutting_down=0;S.shutdown_failed=1;S.command=NONE;
+        snprintf(S.error,sizeof S.error,"Poweroff failed; release POWER and try again");
+        pthread_mutex_unlock(&S.mutex);
+        shutdown_requested=0;alive=1;
     }
-    close(server);pthread_join(thread,NULL);fprintf(stderr,"E1_RECORDER_SHUTDOWN\n");return 0;
+    close(server);fprintf(stderr,"E1_RECORDER_SHUTDOWN\n");return 0;
 }

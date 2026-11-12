@@ -99,6 +99,7 @@ The installer verifies the bundle and individual file SHA-256 hashes, stages a v
 | `/userdata/e1-recorder/current.version` | Active release identifier |
 | `/userdata/e1-recorder/audio.log` | Backend log |
 | `/userdata/e1-recorder/ui.log` | UI log |
+| `/userdata/e1-recorder/poweroff-last.json` | Last shutdown request and audio-finalization audit |
 | `/usr/bin/SogouE1` | Factory application |
 
 These are **unsigned ADB application updates**. SHA-256 checks detect corruption; they do not authenticate a publisher. Wireless OTA, signed-package verification and automatic rollback to a previous custom release are not implemented.
@@ -116,8 +117,11 @@ These are **unsigned ADB application updates**. SHA-256 checks detect corruption
 | **M**, in the preview | Start or stop playback |
 | **+ / −**, in the preview | Seek to the next/previous mark; otherwise step five seconds |
 | **STOP**, while idle | Go back from preview to files, or from files to the ready screen |
+| **POWER**, held for 3 seconds | Save any active recording and shut down the device |
 
 The screen displays meters, waveforms, the selected file and button hints. Held-key auto-repeat is ignored so a held M button adds only one mark.
+
+Release POWER before three seconds to cancel shutdown. At the threshold, the app finalizes WAV audio and marks, closes the audio devices, prepares `/proc/simplae_panel`, syncs storage and invokes the normal BusyBox `poweroff` sequence. The factory application uses the same panel preparation and poweroff command, with a 1.5-second hold followed by a confirmation dialog; this app uses a direct three-second hold.
 
 Touch works alongside these physical keys: tap **FILES** to open recordings, swipe the list, tap a file to preview it, and tap or drag the waveform to seek. Tap a mark to select its position, or swipe the mark row to reveal more marks. The back arrow returns to the previous page. Physical keys remain available after touch interactions. Recording and playback controls use the hardware keys, with no on-screen Record, Mark, Stop or Play buttons.
 
@@ -142,7 +146,7 @@ adb -s 15dacc90f0c2e787 shell 'tail -50 /userdata/e1-recorder/audio.log'
 adb -s 15dacc90f0c2e787 shell 'tail -50 /userdata/e1-recorder/ui.log'
 ```
 
-The backend serves `/api/status`, `/api/files` and `/api/wave` through GET requests. Recording, marking, stopping, playback and seeking use POST requests in `recorder-app/recorderd.c`.
+The backend serves `/api/status`, `/api/files` and `/api/wave` through GET requests. Recording, marking, stopping, playback, seeking and shutdown use POST requests in `recorder-app/recorderd.c`.
 
 Saved `grabToImage` screenshots appear vertically mirrored on the tested Qt software renderer; the physical screen is upright.
 

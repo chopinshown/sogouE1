@@ -1,15 +1,15 @@
 # Sogou E1 Recorder
 
-A custom touchscreen recorder for the Sogou E1, with a native ALSA audio backend and a Qt Quick interface. Applications are built on the Mac and installed through ADB using the firmware's writable application override.
+A custom recorder for the Sogou E1, with physical-button controls, a native ALSA audio backend and a Qt Quick display. Applications are built on the Mac and installed through ADB using the firmware's writable application override.
 
 ## Recorder features
 
 - Record **44,100 Hz, 24-bit, stereo PCM WAV** files.
 - Live left/right level meters with peak hold.
-- Record, Mark and Stop controls.
+- Physical Record, Mark and Stop controls; no on-screen buttons.
 - Marks stored as embedded WAV cue points and in a JSON sidecar.
 - Recording browser, stereo waveform preview, playback and seeking.
-- Tap a mark to seek to its position.
+- Hardware file selection and navigation between marks.
 
 Recordings are saved in the large recording partition:
 
@@ -105,13 +105,21 @@ These are **unsigned ADB application updates**. SHA-256 checks detect corruption
 
 ## Use the app
 
-1. Tap **Record** to start a WAV recording. Watch the L/R meters.
-2. Tap **Mark** to add a sample-indexed cue point.
-3. Tap **Stop** to finalize the file and open its preview.
-4. Open **FILES** to select an existing recording.
-5. Tap **Play**, a waveform position or a mark to preview the audio. Tap **Stop** to stop playback.
+| Physical button | Action |
+| --- | --- |
+| **REC** | Start a new recording while idle, from any page |
+| **M**, while recording | Add one sample-indexed mark per press |
+| **STOP**, while recording or playing | Save the recording or stop playback |
+| **M**, on the ready screen | Open the recording list |
+| **+ / −**, in the recording list | Move the highlighted file selection up/down |
+| **M**, in the recording list | Open the selected file's waveform preview |
+| **M**, in the preview | Start or stop playback |
+| **+ / −**, in the preview | Seek to the next/previous mark; otherwise step five seconds |
+| **STOP**, while idle | Go back from preview to files, or from files to the ready screen |
 
-To return to the factory application, hold the **RECORDER** heading while idle, or run:
+The screen displays meters, waveforms, the selected file and button hints. Held-key auto-repeat is ignored so a held M button adds only one mark.
+
+To return to the factory application, hold **M** for 1.2 seconds on the idle ready screen, then press **M** to confirm or **STOP** to cancel. You can also run:
 
 ```sh
 make -C recorder-app factory

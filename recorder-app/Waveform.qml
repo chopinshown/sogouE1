@@ -8,7 +8,10 @@ Rectangle {
     property real duration: 0
     property real position: 0
     property bool interactive: false
+    signal interactionStarted()
+    signal seekPreview(real seconds)
     signal seekRequested(real seconds)
+    signal interactionFinished()
     radius: 8; color: "#19212d"; clip: true
     onSamplesLeftChanged: drawing.requestPaint()
     onSamplesRightChanged: drawing.requestPaint()
@@ -55,6 +58,10 @@ Rectangle {
     Text { x: 5; y: parent.height * 0.5 + 1; text: "R"; color: "#79b8ee"; font.pixelSize: 8; opacity: 0.7 }
     MouseArea {
         anchors.fill: parent; enabled: wave.interactive
-        onReleased: wave.seekRequested(Math.min(1, Math.max(0, mouse.x / width)) * wave.duration)
+        function secondsAt(x) { return Math.min(1,Math.max(0,x / width)) * wave.duration }
+        onPressed: { wave.interactionStarted(); wave.seekPreview(secondsAt(mouse.x)) }
+        onPositionChanged: if (pressed) wave.seekPreview(secondsAt(mouse.x))
+        onReleased: { wave.seekRequested(secondsAt(mouse.x)); wave.interactionFinished() }
+        onCanceled: wave.interactionFinished()
     }
 }

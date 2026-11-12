@@ -13,6 +13,7 @@ Rectangle {
     property string message: "Connecting to audio…"
     property bool polling: false
     property bool mHomePress: false
+    property bool touchSeeking: false
     property bool recording: audio.state === "recording"
     property bool playing: audio.state === "playing"
     property bool busy: recording || playing
@@ -90,7 +91,7 @@ Rectangle {
             audio = data
             if (data.error) message = data.error
             else if (message === "Connecting to audio…") message = ""
-            if (data.state === "playing" && data.file === preview.name) previewPosition = data.position
+            if (data.state === "playing" && data.file === preview.name && !touchSeeking) previewPosition = data.position
             if (old === "recording" && data.state === "idle") {
                 refreshFiles(); loadWave(data.file, true)
                 message = data.error || "Recording saved"; notice.restart()
@@ -99,8 +100,8 @@ Rectangle {
         })
     }
     function seek(seconds) {
-        previewPosition = seconds
-        if (playing) request("seek?position=" + seconds.toFixed(6), true)
+        previewPosition = Math.min(preview.duration,Math.max(0,seconds))
+        if (playing) request("seek?position=" + previewPosition.toFixed(6), true)
     }
     function seekStep(forward) {
         var position = previewPosition
@@ -118,6 +119,13 @@ Rectangle {
         for (var i = 0; i < files.length; i++) if (files[i].name === preview.name) fileIndex = i
     }
     function showFiles() { refreshFiles(); selectPreviewFile(); page = 1 }
+    function touchFocus() { mHomePress = false; mHoldTimer.stop(); forceActiveFocus() }
+    function goBack() {
+        touchFocus()
+        if (playing) request("stop",true)
+        selectPreviewFile()
+        page = page === 2 ? 1 : 0
+    }
     function playPreview() {
         if (playing) { request("stop",true); return }
         if (!recording && preview.name && preview.duration > 0)
@@ -170,11 +178,20 @@ Rectangle {
     Item {
         x: 18; y: 10; width: 285; height: 32
         Text {
-            x: 0; y: 5
+            x: page ? 28 : 0; y: 5
             text: page === 0 ? "RECORDER" : page === 1 ? "Recordings" : "Playback"
             color: "#f2f5fa"; font.family: "Roboto"; font.bold: true; font.pixelSize: 17
         }
-        Text { x: 207; y: 7; width: 78; horizontalAlignment: Text.AlignRight; text: page === 1 ? "± SELECT" : "HARD KEYS"; color: "#83dcc0"; font.pixelSize: 10; font.bold: true }
+        Text { visible: page !== 0; x: 0; y: -2; text: "‹"; color: "#aab8cb"; font.pixelSize: 31 }
+        MouseArea {
+            visible: page !== 0; x: -8; y: -5; width: 45; height: 42
+            onClicked: app.goBack()
+        }
+        Text { x: 207; y: 7; width: 78; horizontalAlignment: Text.AlignRight; text: page === 0 ? "FILES" : page === 1 ? "± SELECT" : "HARD KEYS"; color: "#83dcc0"; font.pixelSize: 10; font.bold: true; opacity: recording ? 0.35 : 1 }
+        MouseArea {
+            visible: page === 0; enabled: !recording; x: 205; y: -3; width: 80; height: 40
+            onClicked: { app.touchFocus(); app.showFiles() }
+        }
     }
 
     Item {
@@ -212,7 +229,9 @@ Rectangle {
         Text { x: 20; y: 49; text: files.length + " WAV files  ·  " + (freeBytes / (1024*1024*1024)).toFixed(1) + " GB free"; color: "#8f9db2"; font.pixelSize: 11 }
         ListView {
             id: recordingsList
-            x: 16; y: 75; width: 288; height: 207; clip: true; spacing: 6; interactive: false
+            x: 16; y: 75; width: 288; height: 207; clip: true; spacing: 6; interactive: true
+            onMovementStarted: app.touchFocus()
+            onMovementEnded: app.touchFocus()
             model: files
             currentIndex: app.fileIndex
             delegate: Rectangle {
@@ -222,6 +241,12 @@ Rectangle {
                 Text { x: 13; y: 9; width: 245; text: title(modelData.name); color: "#eaf0fa"; font.pixelSize: 14; elide: Text.ElideRight }
                 Text { x: 13; y: 32; text: timeText(modelData.duration,false) + "   ·   " + (modelData.bytes/(1024*1024)).toFixed(1) + " MB   ·   24-bit stereo"; color: "#8fa0b8"; font.pixelSize: 10 }
                 Text { x: 265; y: 13; text: "›"; color: "#81dabb"; font.pixelSize: 24 }
+                MouseArea {
+                    anchors.fill: parent
+                    onPressed: app.touchFocus()
+                    onClicked: { app.fileIndex = index; app.loadWave(modelData.name,true); app.forceActiveFocus() }
+                    onCanceled: app.forceActiveFocus()
+                }
             }
         }
         Text { visible: !files.length; x: 20; y: 134; width: 280; horizontalAlignment: Text.AlignHCenter; text: "No recordings yet.\nPress REC to begin."; color: "#8f9db2"; font.pixelSize: 17; lineHeight: 1.7 }
@@ -233,11 +258,19 @@ Rectangle {
         Text { x: 20; y: 74; text: timeText(previewPosition,true); color: "#f0f5fc"; font.family: "Droid Sans Mono"; font.pixelSize: 23 }
         Text { x: 183; y: 81; width: 117; horizontalAlignment: Text.AlignRight; text: "/ " + timeText(preview.duration,false); color: "#8f9db2"; font.pixelSize: 14 }
         Waveform {
+            id: previewWave
             x: 20; y: 112; width: 280; height: 121
             samplesLeft: preview.left; samplesRight: preview.right; marks: preview.marks; duration: preview.duration; position: previewPosition
+            interactive: true
+            onInteractionStarted: { app.touchFocus(); app.touchSeeking = true }
+            onSeekPreview: app.previewPosition = seconds
+            onSeekRequested: app.seek(seconds)
+            onInteractionFinished: { app.touchSeeking = false; app.forceActiveFocus() }
         }
         Flickable {
-            x: 20; y: 243; width: 280; height: 25; clip: true; interactive: false
+            x: 20; y: 243; width: 280; height: 25; clip: true; interactive: true
+            onMovementStarted: app.touchFocus()
+            onMovementEnded: app.touchFocus()
             contentWidth: markRow.width
             Row {
                 id: markRow; spacing: 6
@@ -246,10 +279,16 @@ Rectangle {
                     Rectangle {
                         width: 78; height: 24; radius: 5; color: "#3a3025"
                         Text { anchors.centerIn: parent; text: "◆ " + modelData.id + "  " + timeText(modelData.seconds,false); color: "#edc989"; font.pixelSize: 10 }
+                        MouseArea {
+                            anchors.fill: parent
+                            onPressed: app.touchFocus()
+                            onClicked: { app.seek(modelData.seconds); app.forceActiveFocus() }
+                            onCanceled: app.forceActiveFocus()
+                        }
                     }
                 }
             }
-            Text { visible: !preview.marks.length; text: "No marks  ·  ± seeks five seconds"; color: "#7f8fa6"; font.pixelSize: 10 }
+            Text { visible: !preview.marks.length; text: "No marks  ·  touch waveform to seek"; color: "#7f8fa6"; font.pixelSize: 10 }
         }
         Text { x: 20; y: 274; text: playing ? "▶ PLAYING" : "■ STOPPED"; color: playing ? "#83dcc0" : "#8f9db2"; font.pixelSize: 10; font.bold: true }
     }

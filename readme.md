@@ -6,10 +6,10 @@ A custom recorder for the Sogou E1, with physical-button controls, a native ALSA
 
 - Record **44,100 Hz, 24-bit, stereo PCM WAV** files.
 - Live left/right level meters with peak hold.
-- Physical Record, Mark and Stop controls; no on-screen buttons.
+- Physical Record, Mark and Stop controls; a button-free recording screen.
 - Marks stored as embedded WAV cue points and in a JSON sidecar.
 - Recording browser, stereo waveform preview, playback and seeking.
-- Hardware file selection and navigation between marks.
+- Hardware and touch file selection, waveform seeking and mark navigation.
 
 Recordings are saved in the large recording partition:
 
@@ -118,6 +118,8 @@ These are **unsigned ADB application updates**. SHA-256 checks detect corruption
 | **STOP**, while idle | Go back from preview to files, or from files to the ready screen |
 
 The screen displays meters, waveforms, the selected file and button hints. Held-key auto-repeat is ignored so a held M button adds only one mark.
+
+Touch works alongside these physical keys: tap **FILES** to open recordings, swipe the list, tap a file to preview it, and tap or drag the waveform to seek. Tap a mark to select its position, or swipe the mark row to reveal more marks. The back arrow returns to the previous page. Physical keys remain available after touch interactions. Recording and playback controls use the hardware keys, with no on-screen Record, Mark, Stop or Play buttons.
 
 To return to the factory application, hold **M** for 1.2 seconds on the idle ready screen, then press **M** to confirm or **STOP** to cancel. You can also run:
 

@@ -1,0 +1,28 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.o
+*.log
+.venv/
+.tools/
+
+# Device data, proprietary firmware and backup images
+factory-backup/
+access-*/
+*.img
+*.img.zst
+firmware-analysis/artifacts/
+firmware-analysis/evidence/
+firmware-analysis/extracted-resources/
+firmware-analysis/design.json
+
+# Locally generated binaries, deployment bundles and recordings
+/recorder_access
+app-probe/unsigned_probe
+app-probe/result.json
+hello-app/dist/
+hello-app/screenshots/
+recorder-app/build/
+recorder-app/dist/
+recorder-app/evidence/
+recorder-app/sysroot/

@@ -19,6 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 #include "wifi.h"
+#include "netaudio.h"
 
 #define RATE 44100
 #define CHANNELS 2
@@ -28,8 +29,8 @@
 #define PORT 18770
 #define VERSION "1.0.0"
 #define MIB (1024ULL*1024ULL)
-enum { IDLE, RECORDING, PLAYING };
-enum { NONE, RECORD, PLAY, STOP };
+enum { IDLE, RECORDING, PLAYING, NETWORK };
+enum { NONE, RECORD, PLAY, STOP, ARM_NETWORK };
 typedef struct {
     float l[PEAKS], r[PEAKS], partial_l, partial_r;
     int count;
@@ -208,7 +209,7 @@ static void start_playback(void) {
     play_file=fopen(path,"rb");
     if(!play_file||read_wave(play_file,&play_data,&play_total)) {snprintf(S.error,sizeof S.error,"Unsupported or unreadable WAV");close_playback(0);return;}
     close_capture();
-    int e=snd_pcm_open(&playback,"default",SND_PCM_STREAM_PLAYBACK,0);
+    int e=snd_pcm_open(&playback,"plughw:0,0",SND_PCM_STREAM_PLAYBACK,0);
     if(e>=0)e=snd_pcm_set_params(playback,SND_PCM_FORMAT_S24_LE,SND_PCM_ACCESS_RW_INTERLEAVED,2,RATE,1,100000);
     if(e<0){set_error("Playback",e);close_playback(0);return;}
     play_frames=(uint64_t)(fmax(0,S.requested_position)*RATE);if(play_frames>=play_total)play_frames=0;
@@ -222,7 +223,19 @@ static void *audio_thread(void *unused) {
     while(alive) {
         pthread_mutex_lock(&S.mutex);
         int command=S.command;S.command=NONE;
-        if(command==STOP){finish_record();close_playback(0);S.mode=IDLE;S.seek=-1;}
+        if(command==STOP){
+            if(S.mode==NETWORK)netaudio_disarm();
+            else {finish_record();close_playback(0);S.mode=IDLE;S.seek=-1;}
+        }
+        if(command==ARM_NETWORK&&S.mode==IDLE){
+            close_capture();
+            if(netaudio_arm())S.mode=NETWORK;
+            else snprintf(S.error,sizeof S.error,"Wi-Fi audio worker is unavailable");
+        }
+        if(S.mode==NETWORK){
+            if(netaudio_armed()){pthread_mutex_unlock(&S.mutex);usleep(10000);continue;}
+            S.mode=IDLE;
+        }
         if(command==RECORD&&S.mode==IDLE){start_record();last_sync=0;}
         if(command==PLAY&&S.mode==IDLE)start_playback();
         if(S.mode==PLAYING&&S.seek>=0) {
@@ -281,6 +294,8 @@ static void *audio_thread(void *unused) {
         }
         pthread_mutex_unlock(&S.mutex);
     }
+    netaudio_disarm();
+    while(netaudio_armed())usleep(10000);
     pthread_mutex_lock(&S.mutex);finish_record();close_playback(0);close_capture();S.mode=IDLE;pthread_mutex_unlock(&S.mutex);
     return NULL;
 }
@@ -303,7 +318,7 @@ static void query_value(const char *query,const char *key,char *out,size_t size)
 static char *status_json(void) {
     char *body=NULL;size_t len=0;FILE *f=open_memstream(&body,&len);
     pthread_mutex_lock(&S.mutex);
-    fprintf(f,"{\"version\":\"%s\",\"state\":\"%s\",\"captureReady\":%s,\"rate\":44100,\"bits\":24,\"channels\":2,\"leftDb\":%.2f,\"rightDb\":%.2f,\"leftRms\":%.2f,\"rightRms\":%.2f,\"elapsed\":%.6f,\"position\":%.6f,\"duration\":%.6f,\"xruns\":%d,\"file\":",VERSION,S.mode==RECORDING?"recording":S.mode==PLAYING?"playing":"idle",S.capture_ready?"true":"false",S.left_db,S.right_db,S.left_rms,S.right_rms,S.mode==RECORDING?S.frames/(double)RATE:S.position,S.position,S.duration,S.xruns);
+    fprintf(f,"{\"version\":\"%s\",\"state\":\"%s\",\"captureReady\":%s,\"rate\":44100,\"bits\":24,\"channels\":2,\"leftDb\":%.2f,\"rightDb\":%.2f,\"leftRms\":%.2f,\"rightRms\":%.2f,\"elapsed\":%.6f,\"position\":%.6f,\"duration\":%.6f,\"xruns\":%d,\"file\":",VERSION,S.mode==RECORDING?"recording":S.mode==PLAYING?"playing":S.mode==NETWORK?"network":"idle",S.capture_ready?"true":"false",S.left_db,S.right_db,S.left_rms,S.right_rms,S.mode==RECORDING?S.frames/(double)RATE:S.position,S.position,S.duration,S.xruns);
     json_string(f,S.name);fputs(",\"error\":",f);json_string(f,S.error);fputs(",\"marks\":",f);print_marks(f);
     fprintf(f,",\"shuttingDown\":%s,\"shutdownFailed\":%s",S.shutting_down?"true":"false",S.shutdown_failed?"true":"false");
     fputs(",\"left\":",f);if(S.mode==RECORDING)print_envelope(f,&S.wave,0,140);else fputs("[]",f);
@@ -361,6 +376,7 @@ static void handle_client(int fd) {
         char *body=NULL;
         if(!strcmp(url,"/api/status"))body=status_json();
         else if(!strcmp(url,"/api/wifi"))body=wifi_json();
+        else if(!strcmp(url,"/api/network"))body=netaudio_json();
         else if(!strcmp(url,"/api/files"))body=files_json();
         else if(!strcmp(url,"/api/wave")&&valid_name(name))body=wave_json(name);
         if(body){response(fd,200,body);free(body);}else response(fd,404,"{\"error\":\"Unknown resource\"}");
@@ -382,7 +398,11 @@ static void handle_client(int fd) {
         shutdown_requested_ms=monotonic_ms();shutdown_requested=1;alive=0;
         fprintf(stderr,"E1_POWEROFF_REQUEST recording=%d\n",shutdown_was_recording);
     }
-    else if(!strcmp(url,"/api/stop"))S.command=STOP;
+    else if(!strcmp(url,"/api/network/start")) {
+        if(S.mode!=IDLE||S.command!=NONE||netaudio_armed()){status=409;error="Stop the current operation first";}
+        else {S.error[0]=0;S.command=ARM_NETWORK;}
+    }
+    else if(!strcmp(url,"/api/stop")||!strcmp(url,"/api/network/stop"))S.command=STOP;
     else if(!strcmp(url,"/api/record")) {
         if(S.mode!=IDLE||S.command!=NONE){status=409;error="Stop the current operation first";}
         else if(!S.capture_ready){status=503;error="Microphone is not ready";}
@@ -423,7 +443,7 @@ int main(int argc,char **argv) {
     struct sockaddr_in addr={.sin_family=AF_INET,.sin_port=htons(PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     if(server<0||bind(server,(void*)&addr,sizeof addr)||listen(server,8)){perror("Recorder API");return 1;}
     fprintf(stderr,"E1_RECORDER_BACKEND_READY %s storage=%s\n",VERSION,storage);
-    wifi_start();
+    wifi_start();netaudio_start();
     for(;;) {
         pthread_t thread;if(pthread_create(&thread,NULL,audio_thread,NULL)){perror("Audio thread");close(server);return 1;}
         while(alive) {
@@ -431,6 +451,7 @@ int main(int argc,char **argv) {
             int r=select(server+1,&set,NULL,NULL,&wait);if(r>0){int fd=accept4(server,NULL,NULL,SOCK_CLOEXEC);if(fd>=0){handle_client(fd);close(fd);}}
         }
         pthread_join(thread,NULL);
+        netaudio_stop();
         wifi_stop();
         if(!shutdown_requested)break;
         /* The audio thread has finalized WAV/cue data and closed both PCMs. */
@@ -453,7 +474,7 @@ int main(int argc,char **argv) {
         snprintf(S.error,sizeof S.error,"Poweroff failed; release POWER and try again");
         pthread_mutex_unlock(&S.mutex);
         shutdown_requested=0;alive=1;
-        wifi_start();
+        wifi_start();netaudio_start();
     }
     close(server);fprintf(stderr,"E1_RECORDER_SHUTDOWN\n");return 0;
 }

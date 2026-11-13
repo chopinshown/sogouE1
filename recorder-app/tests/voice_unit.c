@@ -4,49 +4,8 @@
 #undef NDEBUG
 #include <assert.h>
 
-static void codec_test(void) {
-  int error = 0;
-  SRC_STATE *src = src_new(SRC_SINC_FASTEST, 1, &error);
-  OpusEncoder *enc =
-      opus_encoder_create(16000, 1, OPUS_APPLICATION_VOIP, &error);
-  OpusDecoder *dec = opus_decoder_create(16000, 1, &error);
-  assert(src && enc && dec);
-  opus_encoder_ctl(enc, OPUS_SET_BITRATE(24000));
-  float input[441], output[256];
-  int16_t frame[960], decoded[960];
-  int used = 0, total = 0, packets = 0;
-  double energy = 0;
-  for (int block = 0; block < 300; block++) {
-    for (int i = 0; i < 441; i++)
-      input[i] = 0.25f * sinf(2 * M_PI * 1000 * (block * 441 + i) / 44100.0);
-    SRC_DATA d = {.data_in = input,
-                  .input_frames = 441,
-                  .data_out = output,
-                  .output_frames = 256,
-                  .src_ratio = 16000.0 / 44100};
-    assert(!src_process(src, &d) && d.input_frames_used == 441);
-    total += d.output_frames_gen;
-    for (int i = 0; i < d.output_frames_gen; i++) {
-      frame[used++] = lrintf(output[i] * 32768);
-      if (used == 960) {
-        unsigned char packet[4096];
-        int n = opus_encode(enc, frame, 960, packet, sizeof packet);
-        assert(n > 0 && n < 4096);
-        assert(opus_packet_get_nb_samples(packet, n, 16000) == 960);
-        assert(opus_decode(dec, packet, n, decoded, 960, 0) == 960);
-        for (int k = 0; k < 960; k++)
-          energy += (double)decoded[k] * decoded[k];
-        used = 0;
-        packets++;
-      }
-    }
-  }
-  assert(total > 47900 && total <= 48000 && packets >= 49 && energy > 1e9);
-  src_delete(src);
-  opus_encoder_destroy(enc);
-  opus_decoder_destroy(dec);
-  printf("VOICE_CODEC_PASS samples=%d packets=%d\n", total, packets);
-}
+#include "speech_checks.h"
+
 static void json_test(void) {
   int hello = 0;
   const char *good = "{\"type\":\"hello\",\"transport\":\"websocket\","
@@ -80,6 +39,23 @@ int main(void) {
   assert(!secure_url("ws://example.com/voice", "wss"));
   assert(!secure_url("wss://secret@example.com/voice", "wss"));
   assert(!safe_header("token\r\nInjected: yes"));
+  int32_t raw[3 * E1_CAPTURE_CHANNELS];
+  float mono[3];
+  for (unsigned i = 0; i < 3 * E1_CAPTURE_CHANNELS; ++i)
+    raw[i] = INT32_MAX;
+  raw[6] = INT32_MAX;
+  raw[7] = INT32_MIN;
+  raw[8 + 6] = 1073741824;
+  raw[8 + 7] = 536870912;
+  raw[16 + 6] = -1073741824;
+  raw[16 + 7] = -536870912;
+  mix_main_channels(raw, mono, 3);
+  assert(INPUT_RATE == 48000 && INPUT_FRAMES == 480);
+  assert(fabs(mono[0]) < 1e-6 && fabs(mono[1] - .375) < 1e-6 &&
+         fabs(mono[2] + .375) < 1e-6);
+  puts("VOICE_MAIN_CHANNELS_PASS 48000 Hz, eight-channel capture, selected "
+       "channels 6/7");
+  decimator_test();
   codec_test();
   json_test();
   curl_global_cleanup();

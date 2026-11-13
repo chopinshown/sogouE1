@@ -7,7 +7,7 @@ python3 build-deps.py
     -target aarch64-linux-gnu.2.26 -O2 -g -Wall -Wextra \
     -Ivendor -I../.tools/opus-1.5.2/include -I../.tools/curl-8.23.0/include \
     -I../.tools/libsamplerate-0.2.2/include \
-    recorderd.c wifi.c xiaozhi.c vendor/cjson/cJSON.c sysroot/usr/lib/libasound.so.2 \
+    recorderd.c wifi.c netaudio.c rtp_audio.c speech_decimator.c xiaozhi.c vendor/cjson/cJSON.c sysroot/usr/lib/libasound.so.2 \
     build/deps/opus-1.5.2/libopus.a build/deps/libsamplerate-0.2.2/src/libsamplerate.a \
     build/deps/curl-8.23.0/lib/libcurl.a \
     build/deps/mbedtls-3.6.7/library/libmbedtls.a \

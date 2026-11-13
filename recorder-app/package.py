@@ -22,7 +22,8 @@ with tarfile.open(archive,"w") as tar:
         tar.addfile(info,io.BytesIO(data))
 manifest={"app":"E1 Recorder","version":VERSION,"release":release,"archive":archive.name,
           "sha256":hashlib.sha256(archive.read_bytes()).hexdigest(),"files":hashes,
-          "format":{"container":"WAV PCM","sampleRate":44100,"bits":24,"channels":2},
+          "format":{"container":"WAV PCM","sampleRate":48000,"bits":24,"channels":2},
+          "capture":{"device":"hw:2,0","channels":8,"selectedChannels":[6,7]},
           "storage":"/mnt/sdcard/Recordings","transport":"ADB","signature":None}
 (out/"latest.json").write_text(json.dumps(manifest,indent=2)+"\n")
 print(archive)

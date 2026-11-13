@@ -19,18 +19,20 @@
 #include <time.h>
 #include <unistd.h>
 #include "wifi.h"
+#include "netaudio.h"
 #include "xiaozhi.h"
+#include "audio_format.h"
 
-#define RATE 44100
+#define RATE E1_SAMPLE_RATE
 #define CHANNELS 2
-#define FRAMES 441
+#define FRAMES (RATE/100)
 #define MAX_MARKS 256
 #define PEAKS 1024
 #define PORT 18770
 #define VERSION "1.0.0"
 #define MIB (1024ULL*1024ULL)
-enum { IDLE, RECORDING, PLAYING, ASSISTANT };
-enum { NONE, RECORD, PLAY, STOP, TALK };
+enum { IDLE, RECORDING, PLAYING, NETWORK, ASSISTANT };
+enum { NONE, RECORD, PLAY, STOP, ARM_NETWORK, TALK };
 typedef struct {
     float l[PEAKS], r[PEAKS], partial_l, partial_r;
     int count;
@@ -55,7 +57,9 @@ static char storage[512] = "/mnt/sdcard/Recordings";
 static int record_fd = -1;
 static snd_pcm_t *capture, *playback;
 static FILE *play_file;
+static snd_config_t *playback_config;
 static uint64_t play_frames, play_total;
+static unsigned play_rate=RATE;
 static off_t play_data;
 
 static void signal_stop(int sig) { (void)sig; alive=0; }
@@ -89,7 +93,7 @@ static void set_error(const char *prefix,int code) {
     snprintf(S.error,sizeof S.error,"%s: %s",prefix,snd_strerror(code));
     fprintf(stderr,"%s\n",S.error);
 }
-static void envelope_reset(Envelope *w) { memset(w,0,sizeof *w);w->step=882; }
+static void envelope_reset(Envelope *w) { memset(w,0,sizeof *w);w->step=RATE/50; }
 static void envelope_add(Envelope *w,float l,float r) {
     w->partial_l=fmaxf(w->partial_l,l);w->partial_r=fmaxf(w->partial_r,r);
     if(++w->partial_frames<w->step)return;
@@ -119,14 +123,14 @@ static void print_marks(FILE *f) {
 static void save_marks(void) {
     char path[800],temp[810];path_for(path,sizeof path,S.name,".marks.json");snprintf(temp,sizeof temp,"%s.tmp",path);
     FILE *f=fopen(temp,"w");if(!f)return;
-    fprintf(f,"{\"sampleRate\":44100,\"marks\":");print_marks(f);fprintf(f,"}\n");
+    fprintf(f,"{\"sampleRate\":48000,\"marks\":");print_marks(f);fprintf(f,"}\n");
     fflush(f);fsync(fileno(f));fclose(f);rename(temp,path);
 }
 static void save_wave(void) {
     char path[800],temp[810];path_for(path,sizeof path,S.name,".wave.json");snprintf(temp,sizeof temp,"%s.tmp",path);
     FILE *f=fopen(temp,"w");if(!f)return;
     fprintf(f,"{\"name\":");json_string(f,S.name);
-    fprintf(f,",\"sampleRate\":44100,\"bits\":24,\"channels\":2,\"duration\":%.6f,\"frames\":%llu,\"xruns\":%d,\"marks\":",S.frames/(double)RATE,(unsigned long long)S.frames,S.xruns);
+    fprintf(f,",\"sampleRate\":48000,\"bits\":24,\"channels\":2,\"duration\":%.6f,\"frames\":%llu,\"xruns\":%d,\"marks\":",S.frames/(double)RATE,(unsigned long long)S.frames,S.xruns);
     print_marks(f);fputs(",\"left\":",f);print_envelope(f,&S.wave,0,512);fputs(",\"right\":",f);print_envelope(f,&S.wave,1,512);fputs("}\n",f);
     fflush(f);fsync(fileno(f));fclose(f);rename(temp,path);
 }
@@ -149,14 +153,14 @@ static void finish_record(void) {
     S.duration=S.frames/(double)RATE;S.position=0;save_marks();save_wave();
     fprintf(stderr,"SAVED %s frames=%llu marks=%d xruns=%d\n",S.name,(unsigned long long)S.frames,S.mark_count,S.xruns);
 }
-static int read_wave(FILE *f,off_t *offset,uint64_t *frames) {
+static int read_wave(FILE *f,off_t *offset,uint64_t *frames,unsigned *sample_rate) {
     uint8_t h[12];if(fread(h,1,12,f)!=12||memcmp(h,"RIFF",4)||memcmp(h+8,"WAVE",4))return -1;
     int fmt=0;
     while(fread(h,1,8,f)==8) {
         uint32_t size=u32(h+4);off_t next=ftello(f)+size+(size&1);
         if(!memcmp(h,"fmt ",4)) {
             uint8_t p[40];if(size<16||fread(p,1,size<40?size:40,f)<16)return -1;
-            if(u16(p)!=1||u16(p+2)!=2||u32(p+4)!=RATE||u16(p+12)!=6||u16(p+14)!=24)return -1;fmt=1;
+            if(u16(p)!=1||u16(p+2)!=2||(u32(p+4)!=RATE&&u32(p+4)!=44100)||u16(p+12)!=6||u16(p+14)!=24)return -1;*sample_rate=u32(p+4);fmt=1;
         } else if(!memcmp(h,"data",4)) {if(!fmt||size%6)return -1;*offset=ftello(f);*frames=size/6;return 0;}
         if(fseeko(f,next,SEEK_SET))return -1;
     }
@@ -170,7 +174,7 @@ static int capture_open(void) {
     if((e=snd_pcm_hw_params_any(capture,p))<0)goto bad;
     if((e=snd_pcm_hw_params_set_access(capture,p,SND_PCM_ACCESS_RW_INTERLEAVED))<0)goto bad;
     if((e=snd_pcm_hw_params_set_format(capture,p,SND_PCM_FORMAT_S32_LE))<0)goto bad;
-    if((e=snd_pcm_hw_params_set_channels(capture,p,2))<0)goto bad;
+    if((e=snd_pcm_hw_params_set_channels(capture,p,E1_CAPTURE_CHANNELS))<0)goto bad;
     if((e=snd_pcm_hw_params_set_rate(capture,p,RATE,0))<0)goto bad;
     unsigned period=10000,buffer=100000;int direction=0;
     if((e=snd_pcm_hw_params_set_period_time_near(capture,p,&period,&direction))<0)goto bad;
@@ -178,10 +182,19 @@ static int capture_open(void) {
     if((e=snd_pcm_hw_params(capture,p))<0)goto bad;
     unsigned rate=0,channels=0;snd_pcm_format_t format;
     snd_pcm_hw_params_get_rate(p,&rate,&direction);snd_pcm_hw_params_get_channels(p,&channels);snd_pcm_hw_params_get_format(p,&format);
-    if(rate!=RATE||channels!=2||format!=SND_PCM_FORMAT_S32_LE){e=-EINVAL;goto bad;}
+    if(rate!=RATE||channels!=E1_CAPTURE_CHANNELS||format!=SND_PCM_FORMAT_S32_LE){e=-EINVAL;goto bad;}
     int significant_bits=snd_pcm_hw_params_get_sbits(p);
-    snd_pcm_hw_params_free(p);S.capture_ready=1;
-    fprintf(stderr,"CAPTURE hw:2,0 rate=%u channels=%u format=S32_LE significant_bits=%d; PDM 24-bit samples occupy bits 31..8\n",rate,channels,significant_bits);
+    snd_pcm_hw_params_free(p);p=NULL;
+    /* Let the external main-microphone ADC settle before exposing samples. */
+    int32_t warmup[FRAMES*E1_CAPTURE_CHANNELS];unsigned warmed=0;
+    while(alive&&warmed<RATE/4) {
+        snd_pcm_sframes_t n=snd_pcm_readi(capture,warmup,FRAMES);
+        if(n>0)warmed+=(unsigned)n;
+        else if(n<0){e=(int)n;goto bad;}
+    }
+    if(!alive){e=-EINTR;goto bad;}
+    S.capture_ready=1;
+    fprintf(stderr,"CAPTURE hw:2,0 rate=%u channels=%u format=S32_LE significant_bits=%d; selected_channels=6,7; PDM 24-bit samples occupy bits 31..8\n",rate,channels,significant_bits);
     return 0;
 bad:
     if(p)snd_pcm_hw_params_free(p);if(capture){snd_pcm_close(capture);capture=NULL;}S.capture_ready=0;set_error("Microphone",e);return -1;
@@ -190,6 +203,7 @@ static void close_capture(void) {if(capture){snd_pcm_drop(capture);snd_pcm_close
 static void close_playback(int drain) {
     if(playback){if(drain)snd_pcm_drain(playback);else snd_pcm_drop(playback);snd_pcm_close(playback);playback=NULL;}
     if(play_file){fclose(play_file);play_file=NULL;}
+    if(playback_config){snd_config_delete(playback_config);playback_config=NULL;}
 }
 static void start_record(void) {
     if(!capture&&capture_open())return;
@@ -204,41 +218,67 @@ static void start_record(void) {
     S.frames=0;S.position=0;S.duration=0;S.mark_count=0;S.xruns=0;S.error[0]=0;envelope_reset(&S.wave);S.mode=RECORDING;
     save_marks();fprintf(stderr,"RECORD %s\n",S.name);
 }
+static int output_open(snd_pcm_t **pcm) {
+    snd_config_t *base=NULL,*local=NULL;snd_input_t *input=NULL;
+    int e=snd_config_update_ref(&base);
+    if(e<0)return e;
+    e=snd_config_copy(&local,base);snd_config_unref(base);
+    const char definition[]="pcm.e1_output { type plug slave { pcm \"hw:0,0\" rate 48000 format S24_LE channels 2 } }";
+    if(e>=0)e=snd_input_buffer_open(&input,definition,sizeof definition-1);
+    if(e>=0)e=snd_config_load(local,input);
+    if(input)snd_input_close(input);
+    if(e>=0)e=snd_pcm_open_lconf(pcm,"e1_output",SND_PCM_STREAM_PLAYBACK,0,local);
+    if(e>=0)playback_config=local;else if(local)snd_config_delete(local);
+    return e;
+}
 static void start_playback(void) {
     char path[800];path_for(path,sizeof path,S.requested_file,NULL);
     play_file=fopen(path,"rb");
-    if(!play_file||read_wave(play_file,&play_data,&play_total)) {snprintf(S.error,sizeof S.error,"Unsupported or unreadable WAV");close_playback(0);return;}
+    if(!play_file||read_wave(play_file,&play_data,&play_total,&play_rate)) {snprintf(S.error,sizeof S.error,"Unsupported or unreadable WAV");close_playback(0);return;}
     close_capture();
-    int e=snd_pcm_open(&playback,"default",SND_PCM_STREAM_PLAYBACK,0);
-    if(e>=0)e=snd_pcm_set_params(playback,SND_PCM_FORMAT_S24_LE,SND_PCM_ACCESS_RW_INTERLEAVED,2,RATE,1,100000);
+    int e=output_open(&playback);
+    if(e>=0)e=snd_pcm_set_params(playback,SND_PCM_FORMAT_S24_LE,SND_PCM_ACCESS_RW_INTERLEAVED,2,play_rate,1,100000);
     if(e<0){set_error("Playback",e);close_playback(0);return;}
-    play_frames=(uint64_t)(fmax(0,S.requested_position)*RATE);if(play_frames>=play_total)play_frames=0;
+    play_frames=(uint64_t)(fmax(0,S.requested_position)*play_rate);if(play_frames>=play_total)play_frames=0;
     fseeko(play_file,play_data+(off_t)play_frames*6,SEEK_SET);
-    snprintf(S.name,sizeof S.name,"%s",S.requested_file);S.position=play_frames/(double)RATE;S.duration=play_total/(double)RATE;S.mode=PLAYING;S.error[0]=0;
+    snprintf(S.name,sizeof S.name,"%s",S.requested_file);S.position=play_frames/(double)play_rate;S.duration=play_total/(double)play_rate;S.mode=PLAYING;S.error[0]=0;
     fprintf(stderr,"PLAY %s at frame=%llu\n",S.name,(unsigned long long)play_frames);
 }
 static void *audio_thread(void *unused) {
     (void)unused;
-    int32_t samples[FRAMES*2];uint8_t packed[FRAMES*6];uint64_t last_sync=0;
+    int32_t samples[FRAMES*2],capture_samples[FRAMES*E1_CAPTURE_CHANNELS];uint8_t packed[FRAMES*6];uint64_t last_sync=0;
     while(alive) {
         pthread_mutex_lock(&S.mutex);
         int command=S.command;S.command=NONE;
-        if(command==STOP){finish_record();close_playback(0);if(S.mode==ASSISTANT)xiaozhi_cancel();else S.mode=IDLE;S.seek=-1;}
+        if(command==STOP){
+            if(S.mode==NETWORK)netaudio_disarm();
+            else if(S.mode==ASSISTANT)xiaozhi_cancel();
+            else {finish_record();close_playback(0);S.mode=IDLE;S.seek=-1;}
+        }
         if(command==TALK&&S.mode==IDLE){close_capture();if(xiaozhi_begin())S.mode=ASSISTANT;}
+        if(command==ARM_NETWORK&&S.mode==IDLE){
+            close_capture();
+            if(netaudio_arm())S.mode=NETWORK;
+            else snprintf(S.error,sizeof S.error,"Wi-Fi audio worker is unavailable");
+        }
+        if(S.mode==NETWORK){
+            if(netaudio_armed()){pthread_mutex_unlock(&S.mutex);usleep(10000);continue;}
+            S.mode=IDLE;
+        }
+        if(S.mode==ASSISTANT){
+            if(xiaozhi_active()){pthread_mutex_unlock(&S.mutex);usleep(10000);continue;}
+            S.mode=IDLE;
+        }
         if(command==RECORD&&S.mode==IDLE){start_record();last_sync=0;}
         if(command==PLAY&&S.mode==IDLE)start_playback();
         if(S.mode==PLAYING&&S.seek>=0) {
-            play_frames=(uint64_t)(fmin(S.duration,fmax(0,S.seek))*RATE);if(play_frames>play_total)play_frames=play_total;
-            snd_pcm_drop(playback);snd_pcm_prepare(playback);fseeko(play_file,play_data+(off_t)play_frames*6,SEEK_SET);S.position=play_frames/(double)RATE;S.seek=-1;
+            play_frames=(uint64_t)(fmin(S.duration,fmax(0,S.seek))*play_rate);if(play_frames>play_total)play_frames=play_total;
+            snd_pcm_drop(playback);snd_pcm_prepare(playback);fseeko(play_file,play_data+(off_t)play_frames*6,SEEK_SET);S.position=play_frames/(double)play_rate;S.seek=-1;
         }
         int mode=S.mode;
-        if(mode!=PLAYING&&mode!=ASSISTANT&&!capture)capture_open();
+        if(mode!=PLAYING&&!capture)capture_open();
         int ready=capture!=NULL;
         pthread_mutex_unlock(&S.mutex);
-        if(mode==ASSISTANT) {
-            if(!xiaozhi_active()){pthread_mutex_lock(&S.mutex);S.mode=IDLE;pthread_mutex_unlock(&S.mutex);}
-            usleep(20000);continue;
-        }
         if(mode==PLAYING) {
             size_t n=fread(packed,6,FRAMES,play_file);
             if(!n) {close_playback(1);pthread_mutex_lock(&S.mutex);S.mode=IDLE;S.position=S.duration;S.left_db=S.right_db=-96;pthread_mutex_unlock(&S.mutex);continue;}
@@ -248,20 +288,21 @@ static void *audio_thread(void *unused) {
             while(sent<n&&alive) {snd_pcm_sframes_t k=snd_pcm_writei(playback,samples+sent*2,n-sent);if(k<0){if(snd_pcm_recover(playback,k,1)<0){failed=1;break;}}else sent+=k;}
             play_frames+=sent;snd_pcm_sframes_t delay=0;snd_pcm_delay(playback,&delay);
             pthread_mutex_lock(&S.mutex);
-            S.position=(play_frames>(uint64_t)(delay>0?delay:0)?play_frames-(delay>0?delay:0):0)/(double)RATE;
+            S.position=(play_frames>(uint64_t)(delay>0?delay:0)?play_frames-(delay>0?delay:0):0)/(double)play_rate;
             S.left_db=db(peak[0]);S.right_db=db(peak[1]);S.left_rms=db(sqrt(square[0]/n));S.right_rms=db(sqrt(square[1]/n));
             if(failed){snprintf(S.error,sizeof S.error,"Audio output failed");close_playback(0);S.mode=IDLE;}
             pthread_mutex_unlock(&S.mutex);
             continue;
         }
         if(!ready){usleep(200000);continue;}
-        snd_pcm_sframes_t count=snd_pcm_readi(capture,samples,FRAMES);
+        snd_pcm_sframes_t count=snd_pcm_readi(capture,capture_samples,FRAMES);
         if(count<0) {
             pthread_mutex_lock(&S.mutex);S.xruns++;
             if(snd_pcm_recover(capture,count,1)<0){set_error("Capture interrupted",count);finish_record();S.mode=IDLE;close_capture();}
             pthread_mutex_unlock(&S.mutex);continue;
         }
         if(!count)continue;
+        e1_select_microphones(capture_samples,samples,(unsigned)count);
         double peak[2]={0},square[2]={0};
         pthread_mutex_lock(&S.mutex);
         for(int j=0;j<count*2;j++) {
@@ -287,6 +328,9 @@ static void *audio_thread(void *unused) {
         }
         pthread_mutex_unlock(&S.mutex);
     }
+    xiaozhi_cancel();
+    netaudio_disarm();
+    while(netaudio_armed())usleep(10000);
     pthread_mutex_lock(&S.mutex);finish_record();close_playback(0);close_capture();S.mode=IDLE;pthread_mutex_unlock(&S.mutex);
     return NULL;
 }
@@ -309,9 +353,10 @@ static void query_value(const char *query,const char *key,char *out,size_t size)
 static char *status_json(void) {
     char *body=NULL;size_t len=0;FILE *f=open_memstream(&body,&len);
     pthread_mutex_lock(&S.mutex);
-    fprintf(f,"{\"version\":\"%s\",\"state\":\"%s\",\"captureReady\":%s,\"rate\":44100,\"bits\":24,\"channels\":2,\"leftDb\":%.2f,\"rightDb\":%.2f,\"leftRms\":%.2f,\"rightRms\":%.2f,\"elapsed\":%.6f,\"position\":%.6f,\"duration\":%.6f,\"xruns\":%d,\"file\":",VERSION,S.mode==RECORDING?"recording":S.mode==PLAYING?"playing":S.mode==ASSISTANT?"assistant":"idle",S.capture_ready?"true":"false",S.left_db,S.right_db,S.left_rms,S.right_rms,S.mode==RECORDING?S.frames/(double)RATE:S.position,S.position,S.duration,S.xruns);
+    fprintf(f,"{\"version\":\"%s\",\"state\":\"%s\",\"captureReady\":%s,\"rate\":48000,\"bits\":24,\"channels\":2,\"leftDb\":%.2f,\"rightDb\":%.2f,\"leftRms\":%.2f,\"rightRms\":%.2f,\"elapsed\":%.6f,\"position\":%.6f,\"duration\":%.6f,\"xruns\":%d,\"file\":",VERSION,S.mode==RECORDING?"recording":S.mode==PLAYING?"playing":S.mode==NETWORK?"network":S.mode==ASSISTANT?"assistant":"idle",S.capture_ready?"true":"false",S.left_db,S.right_db,S.left_rms,S.right_rms,S.mode==RECORDING?S.frames/(double)RATE:S.position,S.position,S.duration,S.xruns);
     json_string(f,S.name);fputs(",\"error\":",f);json_string(f,S.error);fputs(",\"marks\":",f);print_marks(f);
     fprintf(f,",\"shuttingDown\":%s,\"shutdownFailed\":%s",S.shutting_down?"true":"false",S.shutdown_failed?"true":"false");
+    fprintf(f,",\"captureChannels\":8,\"sourceChannels\":[6,7],\"playbackSampleRate\":48000,\"playbackSourceRate\":%u",S.mode==PLAYING?play_rate:0);
     fputs(",\"left\":",f);if(S.mode==RECORDING)print_envelope(f,&S.wave,0,140);else fputs("[]",f);
     fputs(",\"right\":",f);if(S.mode==RECORDING)print_envelope(f,&S.wave,1,140);else fputs("[]",f);
     pthread_mutex_unlock(&S.mutex);fputs("}",f);fclose(f);return body;
@@ -324,10 +369,10 @@ static char *files_json(void) {
     for(int i=0;i<n;i++) {
         const char *name=list[i]->d_name;
         if(valid_name(name)) {
-            char path[800];path_for(path,sizeof path,name,NULL);FILE *in=fopen(path,"rb");off_t offset;uint64_t frames;
-            if(in&&!read_wave(in,&offset,&frames)) {
+            char path[800];path_for(path,sizeof path,name,NULL);FILE *in=fopen(path,"rb");off_t offset;uint64_t frames;unsigned file_rate;
+            if(in&&!read_wave(in,&offset,&frames,&file_rate)) {
                 struct stat st;stat(path,&st);
-                if(!first)fputc(',',f);first=0;fputs("{\"name\":",f);json_string(f,name);fprintf(f,",\"duration\":%.6f,\"bytes\":%lld}",frames/(double)RATE,(long long)st.st_size);
+                if(!first)fputc(',',f);first=0;fputs("{\"name\":",f);json_string(f,name);fprintf(f,",\"duration\":%.6f,\"bytes\":%lld,\"sampleRate\":%u}",frames/(double)file_rate,(long long)st.st_size,file_rate);
             }
             if(in)fclose(in);
         }
@@ -367,6 +412,7 @@ static void handle_client(int fd) {
         char *body=NULL;
         if(!strcmp(url,"/api/status"))body=status_json();
         else if(!strcmp(url,"/api/wifi"))body=wifi_json();
+        else if(!strcmp(url,"/api/network"))body=netaudio_json();
         else if(!strcmp(url,"/api/assistant"))body=xiaozhi_json();
         else if(!strcmp(url,"/api/files"))body=files_json();
         else if(!strcmp(url,"/api/wave")&&valid_name(name))body=wave_json(name);
@@ -397,12 +443,16 @@ static void handle_client(int fd) {
         shutdown_requested_ms=monotonic_ms();shutdown_requested=1;alive=0;
         fprintf(stderr,"E1_POWEROFF_REQUEST recording=%d\n",shutdown_was_recording);
     }
-    else if(!strcmp(url,"/api/stop"))S.command=STOP;
     else if(!strcmp(url,"/api/assistant/talk")) {
         if(S.mode!=IDLE||S.command!=NONE||xiaozhi_active()){status=409;error="Finish the current operation first";}
         else if(!S.capture_ready){status=503;error="Microphone is not ready";}
         else S.command=TALK;
     }
+    else if(!strcmp(url,"/api/network/start")) {
+        if(S.mode!=IDLE||S.command!=NONE||netaudio_armed()){status=409;error="Stop the current operation first";}
+        else {S.error[0]=0;S.command=ARM_NETWORK;}
+    }
+    else if(!strcmp(url,"/api/stop")||!strcmp(url,"/api/network/stop"))S.command=STOP;
     else if(!strcmp(url,"/api/record")) {
         if(S.mode!=IDLE||S.command!=NONE){status=409;error="Stop the current operation first";}
         else if(!S.capture_ready){status=503;error="Microphone is not ready";}
@@ -443,7 +493,7 @@ int main(int argc,char **argv) {
     struct sockaddr_in addr={.sin_family=AF_INET,.sin_port=htons(PORT),.sin_addr.s_addr=htonl(INADDR_LOOPBACK)};
     if(server<0||bind(server,(void*)&addr,sizeof addr)||listen(server,8)){perror("Recorder API");return 1;}
     fprintf(stderr,"E1_RECORDER_BACKEND_READY %s storage=%s\n",VERSION,storage);
-    wifi_start();xiaozhi_start();
+    wifi_start();netaudio_start();xiaozhi_start();
     for(;;) {
         pthread_t thread;if(pthread_create(&thread,NULL,audio_thread,NULL)){perror("Audio thread");close(server);return 1;}
         while(alive) {
@@ -451,6 +501,7 @@ int main(int argc,char **argv) {
             int r=select(server+1,&set,NULL,NULL,&wait);if(r>0){int fd=accept4(server,NULL,NULL,SOCK_CLOEXEC);if(fd>=0){handle_client(fd);close(fd);}}
         }
         pthread_join(thread,NULL);
+        netaudio_stop();
         xiaozhi_stop();
         wifi_stop();
         if(!shutdown_requested)break;
@@ -474,7 +525,7 @@ int main(int argc,char **argv) {
         snprintf(S.error,sizeof S.error,"Poweroff failed; release POWER and try again");
         pthread_mutex_unlock(&S.mutex);
         shutdown_requested=0;alive=1;
-        wifi_start();xiaozhi_start();
+        wifi_start();netaudio_start();xiaozhi_start();
     }
     close(server);fprintf(stderr,"E1_RECORDER_SHUTDOWN\n");return 0;
 }

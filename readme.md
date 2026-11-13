@@ -4,19 +4,20 @@ A custom recorder for the Sogou E1, with physical-button controls, a native ALSA
 
 ## Xiaozhi voice assistant
 
-The `feat/xiaozhi-e1` branch adds a Linux client for the [Xiaozhi voice assistant](https://github.com/78/xiaozhi-esp32), using the recorder app as its base. It opens on the voice page: **M** activates/binds the official service, **REC** starts talking, **STOP** sends the turn, and **M** cancels an active operation. **+ / −** adjust voice playback volume. The back arrow opens the recorder; **VOICE** returns to the assistant. Wi-Fi settings and the three-second POWER shutdown remain available.
+The `feat/xiaozhi-e1` branch adds a Linux client for the [Xiaozhi voice assistant](https://github.com/78/xiaozhi-esp32), using the recorder app as its base. It opens on the voice page: **M** activates/binds the official service, **REC** starts talking, **STOP** sends the turn, and **M** cancels an active operation. **+ / −** adjust voice playback volume. The back arrow opens the recorder; **VOICE** returns to the assistant. **AUDIO** opens the separate RTP interface page; recorder, voice and RTP modes have exclusive audio ownership. Xiaozhi capture also selects channels 6/7 at 48 kHz, with a low-pass filter and integer 3:1 decimation to its 16 kHz mono speech protocol. Wi-Fi settings and the three-second POWER shutdown remain available.
 
 See [the port design, setup, controls and limitations](docs/xiaozhi-e1.md). This first port uses manual WebSocket/Opus turns; wake words and full-duplex echo cancellation are not implemented. Build dependencies now include CMake; the build downloads checksum-pinned voice/TLS libraries and includes their license notices in the app bundle.
 
 ## Recorder features
 
-- Record **44,100 Hz, 24-bit, stereo PCM WAV** files.
+- Record **48,000 Hz, 24-bit, stereo PCM WAV** files.
 - Live left/right level meters with peak hold.
 - Physical Record, Mark and Stop controls; a button-free recording screen.
 - Marks stored as embedded WAV cue points and in a JSON sidecar.
 - Recording browser, stereo waveform preview, playback and seeking.
 - Hardware and touch file selection, waveform seeking and mark navigation.
 - Wi-Fi scanning, password entry, saved networks and connection/IP status.
+- Wi-Fi Audio mode: simultaneous 24-bit stereo microphone capture and physical output over RTP/UDP, with a Mac/Windows Python bridge.
 
 Recordings are saved in the large recording partition:
 
@@ -27,7 +28,115 @@ Recordings are saved in the large recording partition:
   REC-YYYYMMDD-HHMMSS-000.wav.wave.json
 ```
 
-Capture uses the digital PDM microphone pair on `hw:2,0`, channels 0 and 1. Its signed 24-bit samples arrive left-aligned in 32-bit words and are packed into three-byte WAV samples. Capture runs at 44.1 kHz without software resampling. Playback uses the device's default ALSA output path.
+Capture opens all eight PDM slots on `hw:2,0` at 48 kHz, then selects zero-based channels **6 and 7** as the stereo recording and network source. These slots carry the external-ADC/main-microphone pair; they were silent at 44.1 kHz with the tested firmware, while 32/48/96 kHz capture produced audio on all eight slots. The selected signed 24-bit samples arrive left-aligned in 32-bit words and are packed into three-byte WAV samples. Capture runs at 48 kHz without software resampling. Playback uses an app-local ALSA plug targeting the physical `hw:0,0` codec at 48 kHz. Existing 44.1 kHz stereo 24-bit WAV files remain visible and playable; an app-local ALSA plug converts playback to 48 kHz while preserving source timing and seeking. The factory `default` ALSA path feeds the software loopback; `eq_drc_process` supplies its playback processing/routing. The custom application uses the physical codec directly.
+
+## Wi-Fi audio interface
+
+This branch adds an experimental stereo network interface. The E1 runs the native audio/network worker; a computer bridge connects the stream to real or virtual audio devices. The recorder and network worker have exclusive ownership of ALSA: stop network mode before recording or previewing a WAV. The recording page retains its button-free layout.
+
+On the recorder, tap **AUDIO** in the top bar, then press **REC** or tap the status panel to enable network audio. The page shows the Wi-Fi IP address while waiting and the computer address when connected, with separate microphone and output meters. **STOP** disables the interface; a second STOP returns to the recorder. **M** opens Wi-Fi settings when the interface is off. Holding POWER for three seconds still performs the normal graceful shutdown.
+
+Install the computer bridge dependencies in a virtual environment (Python 3.10 or newer):
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r recorder-app/host/requirements.txt
+python recorder-app/host/e1_audio.py --list-devices
+```
+
+On Windows, use `py -m venv .venv` and `.venv\Scripts\Activate.ps1` in PowerShell instead of the first two commands. The bridge uses NumPy and python-sounddevice/PortAudio. macOS and Windows sounddevice wheels include PortAudio; other platforms may require a separate PortAudio installation.
+
+For a transport test without opening computer audio devices:
+
+```sh
+# Replace this address with the IP shown on the E1.
+# Sends silence to the E1 and saves its microphone stream as stereo 24-bit WAV.
+python recorder-app/host/e1_audio.py 192.168.0.130 \
+  --duration 20 --record recorder-app/evidence/e1-test.wav \
+  --stats recorder-app/evidence/e1-test.json
+
+# Quiet left 440 Hz / right 880 Hz physical-output test.
+python recorder-app/host/e1_audio.py 192.168.0.130 --tone --duration 15
+```
+
+For normal desktop applications, install two independent virtual audio cables, then route them as follows. The bridge does not install drivers or change the computer's default audio devices.
+
+| Path | Desktop application chooses | Bridge argument |
+| --- | --- | --- |
+| E1 microphones → application | Virtual cable A's recording/input endpoint | `--receive-device` selects cable A's playback/output endpoint |
+| Application → E1 output | Virtual cable B's playback/output endpoint | `--send-device` selects cable B's recording/input endpoint |
+
+macOS can use independent [BlackHole](https://github.com/ExistentialAudio/BlackHole) devices, for example the 2-channel and 16-channel variants, with only the first two channels used on each. Windows can use separate [VB-CABLE](https://vb-audio.com/Cable/) cables, such as A and B. Driver installation may require administrator authentication and a restart of audio applications. Use the device indexes printed by `--list-devices`:
+
+```sh
+# Example indexes only: select your virtual devices from --list-devices.
+python recorder-app/host/e1_audio.py 192.168.0.130 \
+  --receive-device 5 --send-device 6 --buffer-ms 120
+```
+
+For the tested Mac configuration, install **BlackHole 2ch and BlackHole 16ch** (signed/notarized version 0.7.1 was checked), then reload Core Audio or restart the Mac so the devices appear. They can also be installed with `brew install --cask blackhole-2ch blackhole-16ch`. The Mac launcher uses the Command Line Tools C compiler to build a small Core Audio helper that sets only these two virtual devices to 48 kHz:
+
+```sh
+# E1: AUDIO → REC. Then run on the Mac:
+sh recorder-app/host/start-mac.sh 192.168.0.130 --buffer-ms 15 --no-red
+```
+
+In your desktop application's audio settings select **BlackHole 2ch as the microphone/input**, and **BlackHole 16ch as the playback/output**, using stereo channels 1–2. The E1 microphones feed the first device; application playback on the second reaches the E1's physical output. The launcher leaves the Mac's default audio-device selection alone. Ctrl+C closes the bridge; STOP on the E1 disables network mode. The Mac launcher defaults to a 15 ms network target (720 stereo frames, exactly 15 ms). The example disables redundancy to reduce Wi-Fi traffic; omit `--no-red` to enable the short recovery copy. Larger buffers can be selected explicitly when deadline misses cause gaps. The Python CLI's general-purpose default remains 120 ms. These settings do not include the additional Core Audio/ALSA latency.
+
+Use different cables for the two directions; using both ends of one cable feeds the microphone stream back into the E1 output. Configure both virtual cables for 48 kHz stereo (use the first two channels of a larger cable). The bridge's direction names are from the computer's perspective: **receive** feeds an output device, and **send** captures an input device. It opens exactly two channels at 48 kHz. This is a companion-software interface; Wi-Fi alone does not enumerate a sound device in the OS. A dedicated branded HAL/WDM/ASIO driver and installer are outside this prototype. Windows code is provided but has not been exercised on a Windows host.
+
+### Wire format and buffering
+
+- RTP v2 over unicast IPv4 UDP; [L24/48000/2](https://www.rfc-editor.org/rfc/rfc3190.html), dynamic payload type **96**, big-endian signed 24-bit samples, interleaved left/right.
+- **120 frames per packet**, exactly 2.5 ms. RTP timestamps count stereo frames, not individual channel samples. Sequence, timestamp and SSRC start randomly for each session.
+- Default [RFC 2198 redundant audio](https://www.rfc-editor.org/rfc/rfc2198.html), dynamic payload type **97**. Each packet carries the primary L24 block and, after warmup, a copy from **two packets earlier** (about 5 ms) below a 40 ms buffer setting, or **12 packets earlier** (about 30 ms) with larger buffers. The maximum RTP datagram is **1,457 bytes**, below the normal LAN MTU. Plain L24 is available with `--no-red`.
+- Raw audio is 2.304 Mbps each way. RED approximately doubles that, to 4.608 Mbps each way before RTP/UDP/IP overhead. The local link sustained approximately 5 Mbps each way in the preceding bandwidth test, but packet loss and delay remain variable.
+- Receiver jitter buffers reorder by RTP timestamp, deduplicate primary/redundant blocks, recover missing audio, and count unrecoverable blocks. Adaptive linear interpolation follows independent audio clocks, limited to ±2,000 ppm. Source WAV recording remains native-rate; network playback/host capture can be resampled for clock correction.
+- The Mac launcher defaults to **15 ms** and the standalone Python CLI to **120 ms**. `--buffer-ms` accepts 10–200 ms with RED, or 5–200 ms for plain L24. Targets are rounded to whole 120-frame packets. This is only the network buffer: ALSA, PortAudio and virtual devices add latency. Actual end-to-end audio latency has not been measured.
+- UDP sockets request DSCP EF priority, which depends on the LAN honoring it. Nonblocking ALSA capture/output run together. The sender paces queued packets and retries temporary UDP backpressure for a bounded interval. Low-latency mode (below 40 ms) preserves the playout clock, conceals missing blocks, and discards late packets instead of repeatedly pausing to refill. Larger-buffer mode retains fade/rebuffer recovery. Both trim stale startup backlog.
+- Low-latency mode requests **480-frame ALSA buffers** (10 ms), **120-frame periods** (2.5 ms), and **120-frame Mac callbacks** with approximately 2.5 ms requested device latency. PortAudio is allowed to configure its Core Audio client parameters. The API reports actual ALSA sizes and the bridge reports device latency; these are separate from the network target. Startup queue drops are reported separately, and dropping host capture data advances the RTP timestamp so playback stays on the original clock.
+- Basic compound RTCP Sender/Receiver Reports and CNAME are exchanged every five seconds. RTCP BYE and TCP heartbeat/disconnect release the session. A disconnected computer can connect again while the E1 remains armed.
+
+The real vendor driver reports **LPS MAX / IPS Card Disable** even when generic `iwconfig` says power management is off. Audio mode snapshots the actual modes from `/proc/net/rtl8723ds/wlan0/ps_info`, invokes `iwpriv wlan0 pm_set lps=0` and `ips=0`, and restores the snapshot on normal stop/shutdown. The private ioctl is implemented in the [Rockchip/Realtek driver](https://github.com/rockchip-linux/kernel/blob/develop-4.4/drivers/net/wireless/rockchip_wlan/rtl8723ds/os_dep/linux/ioctl_linux.c). No saved Wi-Fi profiles or firmware files are changed.
+
+### Session/control API
+
+The existing HTTP API stays on device loopback port 18770:
+
+- `GET /api/network`: armed/active state, meters, packet/recovery/gap counters, ALSA xruns, queue depth and clock correction.
+- `POST /api/network/start`: reserve the audio hardware and enable the LAN listener.
+- `POST /api/network/stop` or `/api/stop`: disarm and return ownership to the recorder.
+
+Only while armed, a dedicated TCP listener on **18772** accepts one computer. The bridge sends this ASCII line (decimal unsigned integers):
+
+```text
+E1RTP/1 48000 24 2 110 HOST_RTP_PORT HOST_RTCP_PORT HOST_SSRC BUFFER_MS RED_ENABLED\n
+```
+
+The reply is:
+
+```text
+E1RTP/1 48000 24 2 110 18774 18775 E1_SSRC BUFFER_MS\n
+```
+
+After preparing its audio devices, the client sends `START\n`; the E1 opens its PCMs, discards 250 ms of PDM microphone startup transients, and replies `READY\n` before media begins. This settling time occurs once per connection. Ports 18774/18775 carry RTP/RTCP. The peer IP comes from the accepted TCP connection; inbound audio must match that IP, the negotiated UDP source port and SSRC. The client sends `PING\n` once per second and receives `PONG\n`; five seconds without a heartbeat, TCP EOF, STOP, or RTCP BYE ends the media session. The bridge retries initial connection attempts; a failed active session requires rerunning it. There is no pairing, encryption, SRTP or Internet traversal: use an isolated/trusted LAN and arm the interface only when needed. Device ports close when disarmed. `--sdp path.sdp` saves negotiated microphone stream parameters for reference.
+
+### Validation and current limits
+
+```sh
+. .venv/bin/activate
+sh recorder-app/test-rtp.sh
+# Connected E1 required; uses ADB for control only and Wi-Fi for all media.
+python recorder-app/tests/rtp_integration.py --host 192.168.0.130
+python recorder-app/tests/legacy_playback.py
+# macOS with the virtual drivers installed and configured at 48 kHz:
+python recorder-app/tests/mac_virtual_audio.py --host 192.168.0.130 --buffer-ms 15
+```
+
+The C unit suite checks the shared eight-channel→stereo extractor with distinct channel sentinels (including a full-scale negative sample), and runs under AddressSanitizer/UndefinedBehaviorSanitizer and exercises L24 sample layout, packet-loss burst recovery, sequence/timestamp wrapping, RTCP and malformed-packet fuzzing. Python tests cover signed sample boundaries, RTP extensions/padding, bounded buffering, ±500 ppm clock drift with deliberate loss, and desktop audio callbacks. The device integration test checks duplex streaming, deliberate loss recovery, exclusive hardware ownership, RTCP, reconnect/plain L24, and record/mark/stop/waveform/playback after network mode.
+
+Physical headphone output was confirmed on the E1, including periods of clean playback, but the user also heard intermittent clicks. Low-buffer tests run at a 15 ms target with zero hardware xruns, but still show frequent deadline misses; disabling redundancy reduced misses in the tested microphone path. A sub-20 ms end-to-end latency has not been established. Live tests with larger buffers report recovery of hundreds of intentionally dropped packets and zero ALSA xruns; unrecoverable packets and rebuffering still occur on this LAN. The transport is functional and remains experimental, with audible dropouts possible. It is not yet suitable for dependable low-latency instrument monitoring. A muted real Core Audio output-clock test passed without PortAudio xruns, while microphone-network gaps remained. Mac virtual-driver routing has been tested with BlackHole 2ch/16ch at 48 kHz in both directions. Windows hardware testing remains to be performed; desktop endpoints are supplied by the separately installed virtual audio drivers.
 
 ## Tested device
 

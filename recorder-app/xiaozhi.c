@@ -1,5 +1,7 @@
 #define _GNU_SOURCE
 #include "xiaozhi.h"
+#include "audio_format.h"
+#include "speech_decimator.h"
 #include "vendor/cjson/cJSON.h"
 #include <alsa/asoundlib.h>
 #include <curl/curl.h>
@@ -22,8 +24,11 @@
 #define ID_FILE ROOT "/xiaozhi-client-id"
 #define OTA "https://api.tenclass.net/xiaozhi/ota/"
 #define MAX_MESSAGE 32768
-#define INPUT_RATE 44100
-#define VOICE_RATE 16000
+#define INPUT_RATE E1_SAMPLE_RATE
+#define INPUT_FRAMES (INPUT_RATE / 100)
+_Static_assert(INPUT_RATE == SPEECH_INPUT_RATE,
+               "Speech decimator requires 48 kHz input");
+#define VOICE_RATE SPEECH_OUTPUT_RATE
 #define VOICE_FRAME 960
 /* Each queue is bounded to 100 x 60ms, never blocks the recorder/UI thread. */
 #define QUEUE 100
@@ -54,7 +59,7 @@ static int protocol_version = 1, server_rate = 24000;
 static snd_pcm_t *mic, *speaker;
 static OpusEncoder *encoder;
 static OpusDecoder *decoder;
-static SRC_STATE *resampler;
+static SpeechDecimator speech_input;
 static SRC_STATE *output_resampler;
 static float resampled[256];
 static int16_t input_frame[VOICE_FRAME];
@@ -439,10 +444,6 @@ static void close_audio(void) {
     opus_decoder_destroy(decoder);
     decoder = NULL;
   }
-  if (resampler) {
-    src_delete(resampler);
-    resampler = NULL;
-  }
   if (output_resampler) {
     src_delete(output_resampler);
     output_resampler = NULL;
@@ -459,53 +460,45 @@ static int open_input(void) {
     return -1;
   opus_encoder_ctl(encoder, OPUS_SET_BITRATE(24000));
   opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(3));
-  resampler = src_new(SRC_SINC_FASTEST, 1, &error);
-  if (!resampler)
-    return -1;
+  speech_decimator_init(&speech_input);
   error =
       snd_pcm_open(&mic, "hw:2,0", SND_PCM_STREAM_CAPTURE, SND_PCM_NONBLOCK);
   if (error >= 0)
     error = snd_pcm_set_params(mic, SND_PCM_FORMAT_S32_LE,
-                               SND_PCM_ACCESS_RW_INTERLEAVED, 2, INPUT_RATE, 0,
-                               100000);
+                               SND_PCM_ACCESS_RW_INTERLEAVED,
+                               E1_CAPTURE_CHANNELS, INPUT_RATE, 0, 100000);
   if (error < 0)
     return -1;
   /* Nonblocking reads smaller than the configured start threshold otherwise
    * remain EAGAIN forever on the E1's capture driver. */
-  return snd_pcm_start(mic) < 0 ? -1 : 0;
-}
-static int capture_tick(void) {
-  int32_t pcm[441 * 2];
-  float mono[441];
-  snd_pcm_sframes_t n = snd_pcm_readi(mic, pcm, 441);
-  if (n == -EAGAIN)
-    return 0;
-  if (n < 0) {
-    if (snd_pcm_recover(mic, n, 1) < 0)
-      return -1;
-    return snd_pcm_state(mic) == SND_PCM_STATE_PREPARED &&
-                   snd_pcm_start(mic) < 0
-               ? -1
-               : 0;
-  }
-  double peak = 0;
-  for (int i = 0; i < n; i++) {
-    mono[i] = (float)(((double)pcm[2 * i] + pcm[2 * i + 1]) / 4294967296.0);
-    peak = fmax(peak, fabs(mono[i]));
-  }
-  pthread_mutex_lock(&A.mutex);
-  A.level = peak > 0 ? fmax(-96, 20 * log10(peak)) : -96;
-  pthread_mutex_unlock(&A.mutex);
-  SRC_DATA d = {.data_in = mono,
-                .input_frames = n,
-                .data_out = resampled,
-                .output_frames = 256,
-                .src_ratio = (double)VOICE_RATE / INPUT_RATE};
-  if (src_process(resampler, &d) || d.input_frames_used != n)
+  if (snd_pcm_start(mic) < 0)
     return -1;
-  for (int i = 0; i < d.output_frames_gen; i++) {
+  int32_t warmup[INPUT_FRAMES * E1_CAPTURE_CHANNELS];
+  unsigned frames = 0;
+  uint64_t end = now_ms() + 2000;
+  while (!cancelled() && frames < INPUT_RATE / 4 && now_ms() < end) {
+    snd_pcm_sframes_t n = snd_pcm_readi(mic, warmup, INPUT_FRAMES);
+    if (n > 0)
+      frames += (unsigned)n;
+    else if (n == -EAGAIN)
+      usleep(1000);
+    else
+      return -1;
+  }
+  return !cancelled() && frames >= INPUT_RATE / 4 ? 0 : -1;
+}
+static void mix_main_channels(const int32_t *input, float *mono,
+                              unsigned frames) {
+  int32_t selected[INPUT_FRAMES * E1_STEREO_CHANNELS];
+  e1_select_microphones(input, selected, frames);
+  for (unsigned i = 0; i < frames; ++i)
+    mono[i] =
+        (float)(((double)selected[2 * i] + selected[2 * i + 1]) / 4294967296.0);
+}
+static int send_speech_samples(const float *samples, int count) {
+  for (int i = 0; i < count; i++) {
     input_frame[frame_used++] =
-        (int16_t)lrintf(fmaxf(-1, fminf(0.999969f, resampled[i])) * 32768);
+        (int16_t)lrintf(fmaxf(-1, fminf(0.999969f, samples[i])) * 32768);
     if (frame_used == VOICE_FRAME) {
       unsigned char out[MAX_PACKET];
       int size =
@@ -520,12 +513,46 @@ static int capture_tick(void) {
   }
   return 0;
 }
+static int capture_tick(void) {
+  int32_t pcm[INPUT_FRAMES * E1_CAPTURE_CHANNELS];
+  float mono[INPUT_FRAMES];
+  snd_pcm_sframes_t n = snd_pcm_readi(mic, pcm, INPUT_FRAMES);
+  if (n == -EAGAIN)
+    return 0;
+  if (n < 0) {
+    if (snd_pcm_recover(mic, n, 1) < 0)
+      return -1;
+    return snd_pcm_state(mic) == SND_PCM_STATE_PREPARED &&
+                   snd_pcm_start(mic) < 0
+               ? -1
+               : 0;
+  }
+  double peak = 0;
+  mix_main_channels(pcm, mono, (unsigned)n);
+  for (int i = 0; i < n; i++) {
+    peak = fmax(peak, fabs(mono[i]));
+  }
+  pthread_mutex_lock(&A.mutex);
+  A.level = peak > 0 ? fmax(-96, 20 * log10(peak)) : -96;
+  pthread_mutex_unlock(&A.mutex);
+  int output_frames = speech_decimator_process(&speech_input, mono, (unsigned)n,
+                                               resampled, 256);
+  if (output_frames < 0)
+    return -1;
+  return send_speech_samples(resampled, output_frames);
+}
+
 static int stop_listening(void) {
   if (mic) {
     snd_pcm_drop(mic);
     snd_pcm_close(mic);
     mic = NULL;
   }
+  float zeros[SPEECH_FILTER_TAPS + 2] = {0}, tail[128];
+  int tail_count = speech_decimator_process(&speech_input, zeros,
+                                            SPEECH_FILTER_TAPS + 2, tail, 128);
+  if (tail_count < 0 || send_speech_samples(tail, tail_count))
+    return -1;
   if (frame_used) {
     memset(input_frame + frame_used, 0,
            (VOICE_FRAME - frame_used) * sizeof *input_frame);
@@ -560,7 +587,7 @@ static int start_output(void) {
   output_resampler = src_new(SRC_SINC_FASTEST, 1, &error);
   if (!output_resampler)
     return -1;
-  error = snd_pcm_open(&speaker, "default", SND_PCM_STREAM_PLAYBACK,
+  error = snd_pcm_open(&speaker, "plughw:0,0", SND_PCM_STREAM_PLAYBACK,
                        SND_PCM_NONBLOCK);
   if (error >= 0)
     error = snd_pcm_set_params(speaker, SND_PCM_FORMAT_S24_LE,

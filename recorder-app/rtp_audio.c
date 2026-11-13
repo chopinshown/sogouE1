@@ -85,7 +85,7 @@ void rtp_rx_init(RtpRx *rx, uint32_t ssrc, unsigned buffer_ms) {
                         RTP_FRAMES);
   rx->filtered_queue = rx->target;
   rx->ratio = 1;
-  rx->fade = 220;
+  rx->fade = RTP_RATE / 200;
 }
 static void insert(RtpRx *rx, uint32_t timestamp, const uint8_t *pcm, int red) {
   if (!rx->initialized) {
@@ -285,7 +285,7 @@ void rtp_render(RtpRx *rx, int32_t *out, unsigned frames) {
     rx->have_block = 0;
     rx->phase = 0;
     rx->started = 0;
-    rx->fade = 220;
+    rx->fade = RTP_RATE / 200;
     rx->filtered_queue = rx->target;
     ++rx->overruns;
     for (unsigned i = 0; i < RTP_SLOTS; ++i)
@@ -314,7 +314,7 @@ void rtp_render(RtpRx *rx, int32_t *out, unsigned frames) {
             (int32_t)((int64_t)rx->previous[ch] * (frames - i - 1) / frames);
     rx->previous[0] = rx->previous[1] = 0;
     rx->started = 0;
-    rx->fade = 220;
+    rx->fade = RTP_RATE / 200;
     ++rx->concealed;
     return;
   }
@@ -333,7 +333,8 @@ void rtp_render(RtpRx *rx, int32_t *out, unsigned frames) {
     if (rx->fade) {
       for (unsigned ch = 0; ch < 2; ++ch)
         out[i * 2 + ch] =
-            (int32_t)((int64_t)out[i * 2 + ch] * (220 - rx->fade) / 220);
+            (int32_t)((int64_t)out[i * 2 + ch] * (RTP_RATE / 200 - rx->fade) /
+                      (RTP_RATE / 200));
       --rx->fade;
     }
     rx->phase += rx->ratio;

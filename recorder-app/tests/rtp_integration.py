@@ -5,6 +5,7 @@ import json
 import pathlib
 import re
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -56,7 +57,7 @@ def main():
     assert not api('status')['captureReady']
     api('record', True, expected=409)
     with socket.create_connection((args.host, 18772), timeout=10) as client:
-        client.sendall(b'E1RTP/1 48000 24 2 110 50000 50001 42 120 1\n')
+        client.sendall(b'E1RTP/1 44100 24 2 120 50000 50001 42 120 1\n')
         assert client.recv(256).startswith(b'ERROR unsupported session')
     command = [sys.executable, str(ROOT / 'host/e1_audio.py'), args.host,
                '--duration', str(args.seconds), '--buffer-ms', '200',
@@ -79,7 +80,7 @@ def main():
         assert host['receivedPackets'] > args.seconds * 200
         assert host['recoveredPackets'] > 20
         assert final['sentPackets'] > args.seconds * 300
-        assert final['playedFrames'] > 44100 * args.seconds * .4
+        assert final['playedFrames'] > 48000 * args.seconds * .4
         assert final['recoveredPackets'] > 20
         assert final['invalidPackets'] == 0 and host['invalidPackets'] == 0
         assert final['rtcpPackets'] >= 1 and host['rtcpPackets'] >= 1
@@ -91,7 +92,7 @@ def main():
                                capture_output=True, text=True, timeout=30)
         (output / 'plain.log').write_text(plain.stdout + plain.stderr)
         assert plain.returncode == 0, plain.stderr
-        assert api('network')['playedFrames'] > 44100
+        assert api('network')['playedFrames'] > 48000
         print('RTP_INTEGRATION_PASS duplex L24/RED, injected loss recovery, RTCP, exclusive audio ownership, reconnect')
     finally:
         if process is not None and process.poll() is None:
@@ -107,11 +108,19 @@ def main():
     time.sleep(.5)
     api('stop', True)
     saved = until(lambda: (lambda s: s if s['state'] == 'idle' and s['captureReady'] else None)(api('status')))
+    assert saved['rate'] == 48000 and saved['captureChannels'] == 8
+    assert saved['sourceChannels'] == [6, 7]
     name = saved['file']
     assert name not in before and re.fullmatch(r'REC-[0-9-]+\.wav', name)
     assert len(saved['marks']) == 1 and saved['xruns'] == 0 and not saved['error']
+    test_wav = output / 'recording.wav'
+    subprocess.run(['adb', '-s', '15dacc90f0c2e787', 'pull',
+                    '/mnt/sdcard/Recordings/' + name, str(test_wav)],
+                   check=True, capture_output=True)
+    header = test_wav.read_bytes()[:44]
+    assert struct.unpack_from('<HHIIHH', header, 20) == (1, 2, 48000, 288000, 6, 24)
     waveform = api('wave?file=' + name)
-    assert waveform['sampleRate'] == 44100 and waveform['channels'] == 2 and waveform['bits'] == 24
+    assert waveform['sampleRate'] == 48000 and waveform['channels'] == 2 and waveform['bits'] == 24
     api('play?file=' + name, True)
     until(lambda: api('status')['state'] == 'playing')
     api('stop', True)

@@ -38,6 +38,6 @@ Item {
     LevelMeter { x: 20; y: 231; channel: "R"; peak: info.outputRightDb }
     Text {
         x: 20; y: 263; width: 280; font.pixelSize: 10; color: info.concealedPackets ? "#edc989" : "#8f9db2"
-        text: info.state === "error" ? info.message : info.active ? "Recovered " + info.recoveredPackets + " · gaps " + info.concealedPackets + " · " + Number(info.queueMs).toFixed(0) + " ms" : "44.1 kHz · 24 bit · stereo · RTP"
+        text: info.state === "error" ? info.message : info.active ? "Recovered " + info.recoveredPackets + " · gaps " + info.concealedPackets + " · " + Number(info.queueMs).toFixed(0) + " ms" : "48 kHz · 24 bit · stereo · RTP"
     }
 }

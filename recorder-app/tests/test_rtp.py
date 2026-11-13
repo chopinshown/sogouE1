@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'host'))
-from rtp import FRAMES, Receiver, Sender, pack_l24, unpack_l24
+from rtp import RATE, FRAMES, Receiver, Sender, pack_l24, unpack_l24
 
 
 class RtpTests(unittest.TestCase):
@@ -21,15 +21,15 @@ class RtpTests(unittest.TestCase):
         for p in range(50):
             samples = np.column_stack([np.full(FRAMES, p * 1000), np.full(FRAMES, -p * 1000 - 1)]).astype(np.int32)
             packet = tx.encode(samples)
-            self.assertLessEqual(len(packet), 1337)
+            self.assertLessEqual(len(packet), 1457)
             if not 10 <= p < 14:
-                self.assertTrue(rx.receive(packet, 100 + p * FRAMES / 44100))
+                self.assertTrue(rx.receive(packet, 100 + p * FRAMES / RATE))
         for p in range(10, 14):
             slot = rx.slots[(0xfffff000 + p * FRAMES) & 0xffffffff]
             self.assertTrue(slot[1])
             self.assertEqual(slot[0][0, 0], p * 1000)
         for _ in range(10):
-            rx.render(440)
+            rx.render(FRAMES * 4)
         self.assertEqual(rx.recovered, 4)
         self.assertEqual(rx.concealed, 0)
         self.assertGreater(rx.max_sequence, 65535)
@@ -60,7 +60,7 @@ class RtpTests(unittest.TestCase):
     def test_bounded_window_and_silence(self):
         tx = Sender(False, ssrc=123)
         rx = Receiver(123)
-        np.testing.assert_array_equal(rx.render(440), np.zeros((440, 2), dtype=np.int32))
+        np.testing.assert_array_equal(rx.render(FRAMES * 4), np.zeros((FRAMES * 4, 2), dtype=np.int32))
         for _ in range(1000):
             rx.receive(tx.encode(np.zeros((FRAMES, 2), dtype=np.int32)))
         self.assertGreater(rx.overruns, 0)
@@ -71,7 +71,7 @@ class RtpTests(unittest.TestCase):
         for ppm in (-500, 500):
             tx = Sender(ssrc=123)
             rx = Receiver(123, 120)
-            packet_time = FRAMES / (44100 * (1 + ppm / 1e6))
+            packet_time = FRAMES / (RATE * (1 + ppm / 1e6))
             send_at = render_at = 0.0
             silence = np.zeros((FRAMES, 2), dtype=np.int32)
             while min(send_at, render_at) < 60:
@@ -81,27 +81,27 @@ class RtpTests(unittest.TestCase):
                         rx.receive(packet, send_at)
                     send_at += packet_time
                 else:
-                    rx.render(440)
-                    render_at += 440 / 44100
+                    rx.render(FRAMES * 4)
+                    render_at += FRAMES * 4 / RATE
             self.assertGreater(rx.recovered, 1000)
             self.assertEqual(rx.concealed, 0)
             self.assertEqual(rx.overruns, 0)
-            self.assertLess(rx.queue_frames / 44.1, 200)
+            self.assertLess(rx.queue_frames * 1000 / RATE, 200)
 
     def test_bridge_audio_callbacks(self):
         from e1_audio import Bridge
         import argparse
         bridge = Bridge(argparse.Namespace(no_red=False))
-        samples = np.column_stack([np.full(440, .25), np.full(440, -.5)]).astype(np.float32)
-        bridge.capture_callback(samples, 440, None, False)
+        samples = np.column_stack([np.full(FRAMES * 4, .25), np.full(FRAMES * 4, -.5)]).astype(np.float32)
+        bridge.capture_callback(samples, FRAMES * 4, None, False)
         self.assertEqual(len(bridge.capture), 4)
         self.assertEqual(bridge.capture[0][0].tolist(), [2097152, -4194304])
         bridge.receiver = Receiver(42, 40)
         tx = Sender(ssrc=42)
         for _ in range(20):
             bridge.receiver.receive(tx.encode(np.full((FRAMES, 2), 1000000)))
-        output = np.empty((440, 2), dtype=np.float32)
-        bridge.playback_callback(output, 440, None, False)
+        output = np.empty((FRAMES * 4, 2), dtype=np.float32)
+        bridge.playback_callback(output, FRAMES * 4, None, False)
         self.assertIsNone(bridge.audio_error)
         np.testing.assert_allclose(output[-1], 1000000 / 8388608, atol=1e-6)
 
@@ -116,14 +116,14 @@ class RtpTests(unittest.TestCase):
                     packet = tx.encode(silence)
                     if tx.packets % 17:
                         rx.receive(packet, send_at)
-                    send_at += FRAMES / (44100 * (1 + ppm / 1e6))
+                    send_at += FRAMES / (RATE * (1 + ppm / 1e6))
                 else:
                     rx.render(FRAMES)
-                    render_at += FRAMES / 44100
+                    render_at += FRAMES / RATE
             self.assertGreater(rx.recovered, 500)
             self.assertEqual(rx.concealed, 0)
             self.assertEqual(rx.overruns, 0)
-            self.assertLessEqual(rx.queue_frames / 44.1, 20)
+            self.assertLessEqual(rx.queue_frames * 1000 / RATE, 20)
 
     def test_low_latency_bounds_and_callback_size(self):
         from e1_audio import Bridge
@@ -139,7 +139,7 @@ class RtpTests(unittest.TestCase):
             rx.receive(tx.encode(np.zeros((FRAMES, 2), dtype=np.int32)))
         rx.render(FRAMES)
         self.assertEqual(rx.overruns, 1)
-        self.assertLessEqual(rx.queue_frames / 44.1, 20)
+        self.assertLessEqual(rx.queue_frames * 1000 / RATE, 20)
 
     def test_low_latency_does_not_pause_clock_on_packet_gap(self):
         tx = Sender(ssrc=123, distance=2)
@@ -159,16 +159,16 @@ class RtpTests(unittest.TestCase):
         from e1_audio import Bridge
         import argparse
         bridge = Bridge(argparse.Namespace(no_red=False, buffer_ms=15))
-        bridge.capture_callback(np.zeros((880, 2), dtype=np.float32), 880, None, False)
+        bridge.capture_callback(np.zeros((FRAMES * 8, 2), dtype=np.float32), FRAMES * 8, None, False)
         self.assertEqual(bridge.source_overruns, 4)
-        self.assertEqual(bridge.skipped_frames, 440)
+        self.assertEqual(bridge.skipped_frames, FRAMES * 4)
         tx = Sender(ssrc=123, timestamp=1000, distance=2)
         for _ in range(3):
             tx.encode(np.zeros((FRAMES, 2), dtype=np.int32))
         before = tx.timestamp
-        tx.skip(440)
+        tx.skip(FRAMES * 4)
         packet = tx.encode(np.zeros((FRAMES, 2), dtype=np.int32))
-        self.assertEqual(struct.unpack_from('!I', packet, 4)[0], before + 440)
+        self.assertEqual(struct.unpack_from('!I', packet, 4)[0], before + FRAMES * 4)
         self.assertEqual(len(packet), 12 + 1 + FRAMES * 6)
 
 

@@ -54,22 +54,22 @@ int main(int argc, char **argv) {
     n = sizeof rate;
     OSStatus error = AudioObjectGetPropertyData(devices[i], &rate_property, 0,
                                                 NULL, &n, &rate);
-    if (configure && !error && rate != 44100) {
-      Float64 requested = 44100;
+    if (configure && !error && rate != 48000) {
+      Float64 requested = 48000;
       error = AudioObjectSetPropertyData(devices[i], &rate_property, 0, NULL,
                                          sizeof requested, &requested);
       for (unsigned attempt = 0; !error && attempt < 200; ++attempt) {
         n = sizeof rate;
         error = AudioObjectGetPropertyData(devices[i], &rate_property, 0, NULL,
                                            &n, &rate);
-        if (error || rate == 44100)
+        if (error || rate == 48000)
           break;
         usleep(10000);
       }
     }
     printf("%s: %.0f Hz%s\n", text, rate,
            error ? " (configuration failed)" : "");
-    if (error || (configure && rate != 44100))
+    if (error || (configure && rate != 48000))
       failed = 1;
   }
   free(devices);

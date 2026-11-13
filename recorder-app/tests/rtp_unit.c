@@ -8,6 +8,17 @@
 #include <string.h>
 
 int main(void) {
+  int32_t input[3 * E1_CAPTURE_CHANNELS], stereo[3 * 2];
+  for (unsigned f = 0; f < 3; ++f)
+    for (unsigned ch = 0; ch < E1_CAPTURE_CHANNELS; ++ch)
+      input[f * E1_CAPTURE_CHANNELS + ch] = (int32_t)(f * 100 + ch) << 8;
+  input[E1_MIC_RIGHT] = INT32_MIN;
+  e1_select_microphones(input, stereo, 3);
+  for (unsigned f = 0; f < 3; ++f) {
+    assert(stereo[f * 2] == input[f * E1_CAPTURE_CHANNELS + 6]);
+    assert(stereo[f * 2 + 1] == input[f * E1_CAPTURE_CHANNELS + 7]);
+  }
+  assert(E1_SAMPLE_RATE == 48000 && RTP_FRAMES == 120);
   RtpRx *rx = calloc(1, sizeof *rx);
   assert(rx);
   RtpTx tx;
@@ -22,7 +33,7 @@ int main(void) {
       samples[f * 2 + 1] = -samples[f * 2] - 1;
     }
     size_t n = rtp_encode(&tx, samples, 1, packet);
-    assert(n <= 1337);
+    assert(n <= 1457);
     if (p >= 10 && p < 14)
       continue;
     assert(!rtp_receive(rx, packet, n,
@@ -86,7 +97,7 @@ int main(void) {
     memset(samples, 0, sizeof samples);
     size_t size = rtp_encode(&tx, samples, 1, packet);
     if (p != 30 && p != 31)
-      assert(!rtp_receive(rx, packet, size, 100000 + p * 2494ULL));
+      assert(!rtp_receive(rx, packet, size, 100000 + p * 2500ULL));
     rtp_render(rx, out, RTP_FRAMES);
   }
   assert(rx->recovered == 2 && rx->concealed == 0 && rx->overruns == 0);

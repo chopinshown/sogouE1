@@ -7,10 +7,10 @@ import time
 
 import numpy as np
 
-RATE, FRAMES, CHANNELS = 44100, 110, 2
+RATE, FRAMES, CHANNELS = 48000, 120, 2
 BLOCK_BYTES = FRAMES * CHANNELS * 3
 PT_L24, PT_RED, RED_DISTANCE = 96, 97, 12
-MAX_PACKET = 1400
+MAX_PACKET = 1472
 
 
 def delta32(a, b):
@@ -44,7 +44,7 @@ class Sender:
     def encode(self, samples):
         pcm = pack_l24(samples)
         if len(pcm) != BLOCK_BYTES:
-            raise ValueError('Each packet requires 110 stereo frames')
+            raise ValueError('Each packet requires 120 stereo frames')
         payload = pcm
         if self.redundancy:
             if len(self.history) == self.distance:
@@ -112,7 +112,7 @@ class Receiver:
         self.slots = {}
         self.cache = np.empty((0, 2), dtype=np.int32)
         self.phase = 0.0
-        self.fade = 220
+        self.fade = RATE // 200
         self.last_output = np.zeros(2, dtype=np.int32)
         self.previous = np.zeros(2, dtype=np.int32)
         self.gap = False
@@ -254,7 +254,7 @@ class Receiver:
             self.cache = np.empty((0, 2), dtype=np.int32)
             self.phase = 0
             self.started = False
-            self.fade = 220
+            self.fade = RATE // 200
             self.filtered_queue = self.target
             self.overruns += 1
             return (self.last_output * ((frames - 1 - np.arange(frames)) / frames)[:, None]).astype(np.int32)
@@ -264,13 +264,13 @@ class Receiver:
             self.started = True
         if not self.low_latency and self.queue_frames < frames * 1.002 + 2:
             self.started = False
-            self.fade = 220
+            self.fade = RATE // 200
             self.concealed += 1
             fade = (self.last_output * ((frames - 1 - np.arange(frames)) / frames)[:, None]).astype(np.int32)
             self.previous.fill(0)
             return fade
         if not self.low_latency or self.queue_frames >= 2 * FRAMES:
-            self.filtered_queue += (self.queue_frames - self.filtered_queue) * (1 - .99 ** (frames / 440))
+            self.filtered_queue += (self.queue_frames - self.filtered_queue) * (1 - .99 ** (frames / (RATE // 100)))
             self.ratio = min(1.002, max(0.998, 1 + (self.filtered_queue - self.target) * (.000005 if self.low_latency else .0000005)))
         positions = self.phase + np.arange(frames) * self.ratio
         needed = math.floor(self.phase + frames * self.ratio) + 2
@@ -289,7 +289,7 @@ class Receiver:
         self.cache = self.cache[used:]
         if self.fade:
             n = min(frames, self.fade)
-            gain = (220 - self.fade + np.arange(n)) / 220
+            gain = (RATE // 200 - self.fade + np.arange(n)) / (RATE // 200)
             result[:n] = np.rint(result[:n] * gain[:, None]).astype(np.int32)
             self.fade -= n
         self.last_output = result[-1].copy()

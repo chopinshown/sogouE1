@@ -1,13 +1,14 @@
 #ifndef E1_RTP_AUDIO_H
 #define E1_RTP_AUDIO_H
+#include "audio_format.h"
 #include <stddef.h>
 #include <stdint.h>
 
-#define RTP_RATE 44100
-#define RTP_FRAMES 110
+#define RTP_RATE E1_SAMPLE_RATE
+#define RTP_FRAMES E1_PACKET_FRAMES
 #define RTP_BYTES (RTP_FRAMES * 6)
 #define RTP_SLOTS 256
-#define RTP_MAX_PACKET 1400
+#define RTP_MAX_PACKET 1472
 #define RTP_PT_L24 96
 #define RTP_PT_RED 97
 #define RTP_RED_DISTANCE 12

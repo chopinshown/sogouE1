@@ -27,8 +27,8 @@ def main():
     output = ROOT / 'evidence' / ('mac-virtual-' + time.strftime('%Y%m%d-%H%M%S'))
     output.mkdir(parents=True)
     for cable in ('BlackHole 2ch', 'BlackHole 16ch'):
-        assert sd.query_devices(cable)['default_samplerate'] == 44100
-    block_frames = 110 if args.buffer_ms < 40 else 440
+        assert sd.query_devices(cable)['default_samplerate'] == 48000
+    block_frames = 120 if args.buffer_ms < 40 else 480
     latency = .0025 if args.buffer_ms < 40 else .1
     source = {'frame': 0, 'xruns': 0}
     received = {'frames': 0, 'squares': np.zeros(2), 'peak': np.zeros(2), 'xruns': 0}
@@ -37,7 +37,7 @@ def main():
         del timing
         source['xruns'] += int(bool(status))
         if args.tone:
-            phase = (source['frame'] + np.arange(frames)) / 44100
+            phase = (source['frame'] + np.arange(frames)) / 48000
             data[:, 0] = .0158489 * np.sin(2 * math.pi * 440 * phase)
             data[:, 1] = .0158489 * np.sin(2 * math.pi * 880 * phase)
         else:
@@ -57,9 +57,9 @@ def main():
     process = None
     try:
         with contextlib.ExitStack() as stack:
-            stack.enter_context(sd.OutputStream(device='BlackHole 16ch', samplerate=44100, channels=2,
+            stack.enter_context(sd.OutputStream(device='BlackHole 16ch', samplerate=48000, channels=2,
                                                 dtype='float32', blocksize=block_frames, latency=latency, callback=write))
-            stack.enter_context(sd.InputStream(device='BlackHole 2ch', samplerate=44100, channels=2,
+            stack.enter_context(sd.InputStream(device='BlackHole 2ch', samplerate=48000, channels=2,
                                                dtype='float32', blocksize=block_frames, latency=latency, callback=read))
             log = stack.enter_context((output / 'bridge.log').open('w'))
             command = ['sh', str(ROOT / 'host/start-mac.sh'), args.host,
@@ -81,7 +81,7 @@ def main():
                       testSourceXruns=source['xruns'], testCaptureXruns=received['xruns'])
         (output / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
         (output / 'device-history.json').write_text(json.dumps(history, indent=2) + '\n')
-        assert received['frames'] > 44100 * args.seconds * .8
+        assert received['frames'] > 48000 * args.seconds * .8
         assert np.all(rms > 1e-8), 'No microphone samples arrived through the Mac virtual input'
         assert final['receivedPackets'] > args.seconds * 300
         assert host['sentPackets'] > args.seconds * 300
@@ -89,7 +89,7 @@ def main():
         if args.tone:
             assert max(s['outputLeftDb'] for s in history) > -40
             assert max(s['outputRightDb'] for s in history) > -40
-        print('MAC_VIRTUAL_AUDIO_PASS BlackHole 2ch microphone / BlackHole 16ch playback, stereo 44100 Hz')
+        print('MAC_VIRTUAL_AUDIO_PASS BlackHole 2ch microphone / BlackHole 16ch playback, stereo 48000 Hz')
         print('QUALITY', json.dumps({
             'hostConcealed': host['concealedPackets'], 'deviceConcealed': final['concealedPackets'],
             'deviceSendDrops': final['sendDrops'], 'hostAudioXruns': host['audioXruns'],

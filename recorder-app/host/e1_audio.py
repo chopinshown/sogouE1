@@ -23,7 +23,7 @@ class Bridge:
     def __init__(self, args):
         self.args = args
         self.low_latency = getattr(args, 'buffer_ms', 120) < 40
-        self.block_frames = FRAMES if self.low_latency else 440
+        self.block_frames = FRAMES if self.low_latency else RATE // 100
         self.audio_latency_ms = getattr(args, 'audio_latency_ms', None) or (2.5 if self.low_latency else None)
         self.stream_latency = {}
         self.sender = Sender(not args.no_red, distance=2 if self.low_latency else 12)
@@ -119,7 +119,7 @@ class Bridge:
             self.receiver = Receiver(ssrc, buffer_ms)
             if args.sdp:
                 pathlib.Path(args.sdp).write_text(
-                    f'v=0\no=- 0 0 IN IP4 {server_ip}\ns=Sogou E1 stereo microphone\nc=IN IP4 {args.bind if args.bind != "0.0.0.0" else control.getsockname()[0]}\nt=0 0\nm=audio {udp.getsockname()[1]} RTP/AVP 96 97\na=rtpmap:96 L24/44100/2\na=rtpmap:97 red/44100/2\na=fmtp:97 96/96\na=recvonly\n')
+                    f'v=0\no=- 0 0 IN IP4 {server_ip}\ns=Sogou E1 stereo microphone\nc=IN IP4 {args.bind if args.bind != "0.0.0.0" else control.getsockname()[0]}\nt=0 0\nm=audio {udp.getsockname()[1]} RTP/AVP 96 97\na=rtpmap:96 L24/48000/2\na=rtpmap:97 red/48000/2\na=fmtp:97 96/96\na=recvonly\n')
             recording = None
             if args.record:
                 recording = stack.enter_context(wave.open(args.record, 'wb'))

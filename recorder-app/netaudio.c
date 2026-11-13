@@ -128,6 +128,8 @@ static void pcm_close(snd_pcm_t **pcm) {
 static int pcm_open(snd_pcm_t **pcm, const char *device,
                     snd_pcm_stream_t stream, snd_pcm_format_t format,
                     unsigned latency_us) {
+  unsigned channels = stream == SND_PCM_STREAM_CAPTURE ? E1_CAPTURE_CHANNELS
+                                                       : E1_STEREO_CHANNELS;
   int error = snd_pcm_open(pcm, device, stream, SND_PCM_NONBLOCK);
   if (error >= 0 && latency_us <= 10000) {
     snd_pcm_hw_params_t *hw;
@@ -138,7 +140,7 @@ static int pcm_open(snd_pcm_t **pcm, const char *device,
         (error = snd_pcm_hw_params_set_access(
              *pcm, hw, SND_PCM_ACCESS_RW_INTERLEAVED)) >= 0 &&
         (error = snd_pcm_hw_params_set_format(*pcm, hw, format)) >= 0 &&
-        (error = snd_pcm_hw_params_set_channels(*pcm, hw, 2)) >= 0 &&
+        (error = snd_pcm_hw_params_set_channels(*pcm, hw, channels)) >= 0 &&
         (error = snd_pcm_hw_params_set_rate(*pcm, hw, RTP_RATE, 0)) >= 0 &&
         (error = snd_pcm_hw_params_set_period_size_near(*pcm, hw, &period,
                                                         &direction)) >= 0 &&
@@ -158,11 +160,11 @@ static int pcm_open(snd_pcm_t **pcm, const char *device,
     /* Some ALSA plugins impose their own period sizes; keep a bounded fallback.
      */
     if (error < 0)
-      error = snd_pcm_set_params(*pcm, format, SND_PCM_ACCESS_RW_INTERLEAVED, 2,
-                                 RTP_RATE, 1, latency_us);
+      error = snd_pcm_set_params(*pcm, format, SND_PCM_ACCESS_RW_INTERLEAVED,
+                                 channels, RTP_RATE, 1, latency_us);
   } else if (error >= 0)
-    error = snd_pcm_set_params(*pcm, format, SND_PCM_ACCESS_RW_INTERLEAVED, 2,
-                               RTP_RATE, 1, latency_us);
+    error = snd_pcm_set_params(*pcm, format, SND_PCM_ACCESS_RW_INTERLEAVED,
+                               channels, RTP_RATE, 1, latency_us);
   if (error >= 0 && stream == SND_PCM_STREAM_CAPTURE)
     error = snd_pcm_start(*pcm);
   if (error < 0) {
@@ -201,7 +203,7 @@ static int recover_pcm(snd_pcm_t *pcm, int error, int capture) {
 static int settle_microphone(snd_pcm_t *mic) {
   /* The PDM stream can contain near-full-scale startup transients. Do not
    * publish those samples to desktop applications when opening a session. */
-  int32_t samples[512 * 2];
+  int32_t samples[512 * E1_CAPTURE_CHANNELS];
   unsigned frames = 0;
   uint64_t deadline = now_us() + 2000000;
   while (enabled() && frames < RTP_RATE / 4 && now_us() < deadline) {
@@ -298,7 +300,7 @@ static void session(int control, int udp, int rtcp, struct sockaddr_in peer) {
     free(rx);
     goto done;
   }
-  snprintf(line, sizeof line, "E1RTP/1 44100 24 2 110 %u %u %u %u\n",
+  snprintf(line, sizeof line, "E1RTP/1 48000 24 2 120 %u %u %u %u\n",
            AUDIO_PORT, RTCP_PORT, tx.ssrc, buffer);
   if (send_line(control, line)) {
     free(rx);
@@ -345,11 +347,12 @@ static void session(int control, int udp, int rtcp, struct sockaddr_in peer) {
   pthread_mutex_unlock(&N.lock);
   state("streaming", "Stereo audio connected");
   fprintf(stderr,
-          "E1_RTP_DUPLEX_READY peer=%s rate=44100 bits=24 channels=2 buffer=%u "
+          "E1_RTP_DUPLEX_READY peer=%s rate=48000 bits=24 channels=2 buffer=%u "
           "red=%u\n",
           N.peer, buffer, red);
   uint64_t heartbeat = now_us(), last_rtcp = 0, last_stats = 0;
-  int32_t captured[512 * 2], pending[RTP_FRAMES * 2], output[RTP_FRAMES * 2];
+  int32_t captured[512 * E1_CAPTURE_CHANNELS], selected[512 * 2],
+      pending[RTP_FRAMES * 2], output[RTP_FRAMES * 2];
   unsigned fill = 0, written = RTP_FRAMES;
   struct QueuedPacket {
     uint8_t data[RTP_MAX_PACKET];
@@ -433,9 +436,10 @@ static void session(int control, int udp, int rtcp, struct sockaddr_in peer) {
       }
       if (!count)
         break;
+      e1_select_microphones(captured, selected, (unsigned)count);
       for (snd_pcm_sframes_t f = 0; f < count; ++f) {
         for (unsigned ch = 0; ch < 2; ++ch) {
-          int32_t value = captured[f * 2 + ch] >> 8;
+          int32_t value = selected[f * 2 + ch] >> 8;
           pending[fill * 2 + ch] = value;
           input_peak[ch] = fmax(input_peak[ch], fabs(value / 8388608.0));
         }
@@ -710,8 +714,8 @@ char *netaudio_json(void) {
   fprintf(f,
           "{\"armed\":%s,\"active\":%s,\"state\":\"%s\",\"message\":\"%s\","
           "\"peer\":\"%s\",\"controlPort\":%d,\"rtpPort\":%d,\"rtcpPort\":%d,"
-          "\"sampleRate\":44100,\"bits\":24,\"channels\":2,\"framesPerPacket\":"
-          "110,\"bufferMs\":%u,\"sentPackets\":%llu,\"receivedPackets\":%llu,"
+          "\"sampleRate\":48000,\"bits\":24,\"channels\":2,\"framesPerPacket\":"
+          "120,\"bufferMs\":%u,\"sentPackets\":%llu,\"receivedPackets\":%llu,"
           "\"recoveredPackets\":%llu,\"concealedPackets\":%llu,"
           "\"invalidPackets\":%llu,\"sendDrops\":%llu,\"xruns\":%llu,"
           "\"playedFrames\":%llu,\"rtcpPackets\":%llu,\"inputLeftDb\":%.2f,"
@@ -726,7 +730,8 @@ char *netaudio_json(void) {
           (unsigned long long)N.rtcp, N.input[0], N.input[1], N.output[0],
           N.output[1], N.jitter, N.queue, N.ppm);
   fprintf(f,
-          ",\"redDistancePackets\":%u,\"captureBufferFrames\":%u,"
+          ",\"redDistancePackets\":%u,\"captureChannels\":8,\"sourceChannels\":"
+          "[6,7],\"captureBufferFrames\":%u,"
           "\"capturePeriodFrames\":%u,\"playbackBufferFrames\":%u,"
           "\"playbackPeriodFrames\":%u}",
           N.red_distance, N.capture_buffer, N.capture_period, N.playback_buffer,

@@ -246,7 +246,7 @@ Rectangle {
             color: recording ? "#4c2631" : "#20372f"
             Text { anchors.centerIn: parent; text: recording ? "●  REC" : audio.captureReady ? "READY" : "WAIT"; color: recording ? "#ff8795" : "#83dcc0"; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1 }
         }
-        Text { x: 111; y: 53; width: 189; horizontalAlignment: Text.AlignRight; text: "44.1 kHz · 24 bit · STEREO"; color: "#8f9db2"; font.pixelSize: 10 }
+        Text { x: 111; y: 53; width: 189; horizontalAlignment: Text.AlignRight; text: "48 kHz · 24 bit · STEREO"; color: "#8f9db2"; font.pixelSize: 10 }
         Text {
             x: 20; y: 77; width: 280; horizontalAlignment: Text.AlignHCenter
             text: timeText(recording ? audio.elapsed : 0, true)

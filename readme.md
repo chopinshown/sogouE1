@@ -18,6 +18,7 @@ See [the port design, setup, controls and limitations](docs/xiaozhi-e1.md). This
 - Hardware and touch file selection, waveform seeking and mark navigation.
 - Wi-Fi scanning, password entry, saved networks and connection/IP status.
 - Wi-Fi Audio mode: simultaneous 24-bit stereo microphone capture and physical output over RTP/UDP, with a Mac/Windows Python bridge.
+- Experimental noise reduction using the six auxiliary microphones, with live headphone A/B monitoring.
 
 Recordings are saved in the large recording partition:
 
@@ -29,6 +30,42 @@ Recordings are saved in the large recording partition:
 ```
 
 Capture opens all eight PDM slots on `hw:2,0` at 48 kHz, then selects zero-based channels **6 and 7** as the stereo recording and network source. These slots carry the external-ADC/main-microphone pair; they were silent at 44.1 kHz with the tested firmware, while 32/48/96 kHz capture produced audio on all eight slots. The selected signed 24-bit samples arrive left-aligned in 32-bit words and are packed into three-byte WAV samples. Capture runs at 48 kHz without software resampling. Playback uses an app-local ALSA plug targeting the physical `hw:0,0` codec at 48 kHz. Existing 44.1 kHz stereo 24-bit WAV files remain visible and playable; an app-local ALSA plug converts playback to 48 kHz while preserving source timing and seeking. The factory `default` ALSA path feeds the software loopback; `eq_drc_process` supplies its playback processing/routing. The custom application uses the physical codec directly.
+
+## Auxiliary microphones and headphone comparison
+
+Tap the **48 kHz · 24 bit · RAW ›** line on the recorder page to open **Mic / Noise**. The recording page keeps its button-free layout.
+
+1. Plug headphones into the E1, then tap **MONITOR OFF** to listen to the main stereo microphone pair.
+2. Tap **LEARN ROOM NOISE** and stay quiet for about two seconds, keeping the background noise running.
+3. Tap **ORIGINAL** or **REDUCED** to compare the same live input. **M** also switches modes; **±** adjusts headphone volume. The default volume is 25%.
+4. Press **REC** to record in the selected mode. Physical **M** adds marks and **STOP** saves as before. Noise mode cannot change during recording. The waveform sidecar includes `noiseReduced`.
+
+Six meters show the RMS level of zero-based auxiliary channels **0–5**; the main stereo pair remains **6–7**. All eight slots are sampled together at **48 kHz / 24 bits**. This first implementation estimates the noise spectrum of each main mic and each auxiliary mic during calibration, then tracks a median of the six normalized auxiliary noise spectra. A smoothed, shared stereo Wiener-style gain suppresses the main pair while retaining its relative phase and balance. Auxiliary tracking is limited to ±6 dB around the learned profile, and maximum per-bin attenuation is 12 dB. This is spectral noise suppression, not factory beamforming or echo cancellation: body microphones also hear speech, so a quiet calibration matters, and weak speech or changing noise can still sound unnatural. Relearn after moving the recorder or changing the noise source.
+
+Both headphone modes have the same **512-frame (10.67 ms) DSP delay**, with a 20 ms crossfade when switching. The physical playback buffer is 960 frames (20 ms), with 240-frame periods; capture/driver latency is additional, and end-to-end latency has not been measured. The audio owner requests Linux round-robin scheduling at priority 10 to keep the short output buffer fed while the UI renders. Monitoring runs during recording, pauses briefly while finalizing the file, yields the output device to file playback or Wi-Fi Audio, and resumes afterward if still enabled. Periodic SD-card flushes run on a separate worker, with at most one flush in flight; finalization waits for it before closing the file. Noise mode and calibration are session settings; restart defaults to original audio and monitoring off. Wi-Fi RTP and Xiaozhi speech audio remain unprocessed by this feature. Monitoring also yields to the Xiaozhi assistant and resumes after it releases its audio devices.
+
+Processed recordings trim the initial DSP delay and flush the remaining samples at STOP, retaining the captured frame count and mark timing. Original recordings remain direct stereo PCM from channels 6–7. Calibration and switching are available through loopback API endpoints `POST /api/noise/learn`, `/api/noise/on`, `/api/noise/off`; headphone control uses `/api/monitor/start`, `/api/monitor/stop`, and `/api/monitor/volume?value=0..100`. `GET /api/status` reports `noise` and `monitor` diagnostics. `reductionDb` summarizes spectral gains, not measured speech SNR improvement.
+
+For a full-array diagnostic WAV saved on the Mac (room audio is kept in the ignored `evidence` directory):
+
+```sh
+# Requires USB/ADB and an idle recorder with Wi-Fi Audio disabled.
+python3 recorder-app/host/capture_array.py --seconds 8
+
+# Render aligned original/reduced WAV files with the exact device DSP.
+# The first two seconds of array.wav must contain only background noise.
+cc -std=c11 -O2 recorder-app/noise_reduce.c recorder-app/host/denoise_array.c \
+  -lm -o recorder-app/build/denoise-array
+recorder-app/build/denoise-array PATH/array.wav PATH/original.wav PATH/reduced.wav
+
+make -C recorder-app test-noise
+sh recorder-app/test-noise-device.sh  # synthetic DSP/files only, no PCMs
+python3 recorder-app/tests/noise_integration.py
+```
+
+The capture tool temporarily closes only the managed idle audio backend and restores the recorder afterward. It refuses to interrupt active recording, playback, or an armed network interface. Its short temporary recorder-side WAV is removed after transfer; existing recordings are untouched. The offline renderer learns the initial noise, then enables reduction; the initial calibration section remains dry.
+
+Validation on this E1: eight seconds of synchronous eight-channel capture with no capture overruns; all six auxiliary channels active. The captured room segment was about **6.3 dB lower in level** after processing (without a clean speech reference this is not an SNR measurement). Native sanitizer tests and E1 synthetic tests measured **8.5 dB** stationary-noise attenuation and 0.1195 output amplitude for a 0.12 speech-band test tone. A test holding main inputs fixed confirmed that changing only auxiliary power changes suppression. Synthetic recording tests covered 73, 12,345, and 48,000 frames, including short clips, tail flushing, and cue preservation. The hardware lifecycle test covered dry/wet WAVs and marks, an 11-second monitored recording crossing two SD flushes, 10 seconds of steady monitoring, and playback/network handoff, with no capture or monitor xruns. On 2026-11-13, the user compared the live headphone modes with the current room noise and confirmed: “Noise is lower and voice is clear.” Other environments still need listening tests and recalibration. The spectral processing approach follows standard [STFT gain-based enhancement](https://www.mathworks.com/help/dsp/ug/speech-enhancement-with-gain-in-frequency-domain.html) and [noise-estimation/filtering principles](https://signalprocessingsociety.org/sites/default/files/tutorial_sipa_2011_part1.pdf).
 
 ## Wi-Fi audio interface
 

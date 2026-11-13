@@ -165,6 +165,7 @@ Rectangle {
             return
         }
         if (page === 4 || networking) { page = 4; networkPage.hardware(key); return }
+        if (page === 5 && !busy) { signalPage.hardware(key); return }
         if (key === Qt.Key_3) {
             if (!busy && audio.captureReady) startRecording()
             return
@@ -220,7 +221,7 @@ Rectangle {
         x: 18; y: 10; width: 285; height: 32
         Text {
             x: page ? 28 : 0; y: 5
-            text: page === 0 ? "RECORDER" : page === 1 ? "Recordings" : page === 3 ? "Wi-Fi" : page === 4 ? "Wi-Fi Audio" : "Playback"
+            text: page === 0 ? "RECORDER" : page === 1 ? "Recordings" : page === 3 ? "Wi-Fi" : page === 4 ? "Wi-Fi Audio" : page === 5 ? "Mic / Noise" : "Playback"
             color: "#f2f5fa"; font.family: "Roboto"; font.bold: true; font.pixelSize: 17
         }
         Text { visible: page !== 0; x: 0; y: -2; text: "‹"; color: "#aab8cb"; font.pixelSize: 31 }
@@ -246,7 +247,8 @@ Rectangle {
             color: recording ? "#4c2631" : "#20372f"
             Text { anchors.centerIn: parent; text: recording ? "●  REC" : audio.captureReady ? "READY" : "WAIT"; color: recording ? "#ff8795" : "#83dcc0"; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1 }
         }
-        Text { x: 111; y: 53; width: 189; horizontalAlignment: Text.AlignRight; text: "48 kHz · 24 bit · STEREO"; color: "#8f9db2"; font.pixelSize: 10 }
+        Text { x: 111; y: 53; width: 189; horizontalAlignment: Text.AlignRight; text: "48 kHz · 24 bit · " + (audio.noise && audio.noise.enabled ? "NR" : "RAW") + " ›"; color: "#83dcc0"; font.pixelSize: 10 }
+        MouseArea { x: 105; y: 43; width: 200; height: 32; enabled: !busy; onClicked: { app.touchFocus(); app.page = 5 } }
         Text {
             x: 20; y: 77; width: 280; horizontalAlignment: Text.AlignHCenter
             text: timeText(recording ? audio.elapsed : 0, true)
@@ -338,11 +340,12 @@ Rectangle {
         Text { x: 20; y: 274; text: playing ? "▶ PLAYING" : "■ STOPPED"; color: playing ? "#83dcc0" : "#8f9db2"; font.pixelSize: 10; font.bold: true }
     }
     NetworkPage { id: networkPage; visible: page === 4; anchors.fill: parent; host: app }
+    SignalPage { id: signalPage; visible: page === 5; anchors.fill: parent; host: app }
     WifiPage { id: wifiPage; visible: page === 3; anchors.fill: parent; host: app }
     Rectangle { x: 20; y: 291; width: 280; height: 1; color: "#2a3442" }
     Text {
         x: 20; y: 300; width: 280; elide: Text.ElideRight
-        text: page === 4 ? (networkPage.info.armed ? "STOP disable · touch status to disable" : "REC enable · M Wi-Fi · STOP back") : page === 3 ? wifiPage.localMessage || wifiPage.info.message || (wifiPage.editing ? "Tap to cycle · hold for digit · abc › modes" : "STOP back · REC record") : message || (page === 1 ? "± choose · M open · STOP back" : page === 2 ? "M play/stop · ± marks/seek · STOP back" : recording ? "M mark · STOP save" : "REC record · M files · + Wi-Fi · hold M exit")
+        text: page === 5 ? (message || "M compare · ± volume · REC record · STOP back") : page === 4 ? (networkPage.info.armed ? "STOP disable · touch status to disable" : "REC enable · M Wi-Fi · STOP back") : page === 3 ? wifiPage.localMessage || wifiPage.info.message || (wifiPage.editing ? "Tap to cycle · hold for digit · abc › modes" : "STOP back · REC record") : message || (page === 1 ? "± choose · M open · STOP back" : page === 2 ? "M play/stop · ± marks/seek · STOP back" : recording ? "M mark · STOP save" : "REC record · M files · + Wi-Fi · hold M exit")
         color: audio.error ? "#ff9c9e" : "#8193ac"; font.pixelSize: 10
     }
     Rectangle {
